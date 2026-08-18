@@ -424,37 +424,93 @@ async function main() {
   }
   console.log(`  policy settings         ${SETTINGS.length}`);
 
-  // --- Bootstrap administrator (optional, explicit) -------------------------
-  const adminEmail = process.env.SEED_ADMIN_EMAIL;
-  const adminPassword = process.env.SEED_ADMIN_PASSWORD;
+  // --- Administrator accounts (§24, §25, §42) -------------------------------
+  //
+  // TWO SEPARATE ACCOUNTS, deliberately, and this is not bureaucracy.
+  //
+  //   SUPER ADMINISTRATOR    system administration. Holds every permission,
+  //                          which is exactly why it should be used rarely and
+  //                          why every act it takes is audited. §24 calls it
+  //                          "tightly controlled".
+  //
+  //   FINANCE ADMINISTRATOR  the day-to-day office that configures accounts,
+  //                          allocation rules, beneficiaries and prices — and
+  //                          which CANNOT confirm a payment or approve a refund.
+  //
+  // Giving one person both would recreate exactly the concentration §25 forbids,
+  // so reviewRoleCombination() would reject the pair. They are separate accounts
+  // for separate people.
+  //
+  // NEITHER IS CREATED WITH A DEFAULT PASSWORD. A known-password administrator
+  // is how a financial system is owned on its first day. Each is created only
+  // when its password is supplied explicitly in the environment.
+  const admins: { envEmail: string; envPassword: string; role: 'SUPER_ADMINISTRATOR' | 'FINANCE_ADMINISTRATOR'; label: string; designation: string }[] = [
+    {
+      envEmail: 'SEED_SUPERADMIN_EMAIL',
+      envPassword: 'SEED_SUPERADMIN_PASSWORD',
+      role: 'SUPER_ADMINISTRATOR',
+      label: 'System administrator',
+      designation: 'Super Administrator',
+    },
+    {
+      envEmail: 'SEED_ADMIN_EMAIL',
+      envPassword: 'SEED_ADMIN_PASSWORD',
+      role: 'FINANCE_ADMINISTRATOR',
+      label: 'Finance administrator',
+      designation: 'Finance Administrator',
+    },
+  ];
 
-  if (adminEmail && adminPassword) {
-    if (adminPassword.length < 12) {
-      throw new Error('SEED_ADMIN_PASSWORD must be at least 12 characters. This account can configure where money goes.');
+  let created = 0;
+  for (const admin of admins) {
+    const email = process.env[admin.envEmail]?.trim().toLowerCase();
+    const password = process.env[admin.envPassword];
+
+    if (!email || !password) {
+      console.log(`  ${admin.label.padEnd(22)} skipped — set ${admin.envEmail} and ${admin.envPassword}`);
+      continue;
     }
+    if (password.length < 12) {
+      throw new Error(
+        `${admin.envPassword} must be at least 12 characters. This account can change where money is sent.`
+      );
+    }
+
     const user = await prisma.user.upsert({
-      where: { email: adminEmail },
-      update: {},
+      where: { email },
+      update: { fullName: admin.label, designation: admin.designation, status: 'ACTIVE' },
       create: {
-        email: adminEmail,
-        fullName: 'Bootstrap administrator',
-        passwordHash: await bcrypt.hash(adminPassword, 12),
+        email,
+        fullName: admin.label,
+        designation: admin.designation,
+        passwordHash: await bcrypt.hash(password, 12),
         status: 'ACTIVE',
-        // §42: MFA is required for financial administration. The account cannot
-        // be used for anything sensitive until it is enrolled.
+        // §42 requires MFA for financial administration. The account exists but
+        // the route guard REFUSES every configuration action until a second
+        // factor is enrolled — so this false is a live control, not a to-do.
         mfaEnabled: false,
       },
     });
+
     await prisma.roleAssignment.upsert({
-      where: { userId_role: { userId: user.id, role: 'SUPER_ADMINISTRATOR' } },
+      where: { userId_role: { userId: user.id, role: admin.role } },
       update: { isActive: true },
-      create: { userId: user.id, role: 'SUPER_ADMINISTRATOR', reason: 'Bootstrap administrator, created at installation.' },
+      create: {
+        userId: user.id,
+        role: admin.role,
+        reason: 'Created at installation.',
+      },
     });
-    console.log(`  bootstrap administrator ${adminEmail}`);
-    console.log('    ENROL MFA AND CHANGE THIS PASSWORD BEFORE GO-LIVE.');
-  } else {
-    console.log('  bootstrap administrator skipped');
-    console.log('    set SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD to create one');
+
+    console.log(`  ${admin.label.padEnd(22)} ${email} (${admin.role})`);
+    created += 1;
+  }
+
+  if (created > 0) {
+    console.log('');
+    console.log('  ENROL MFA ON EACH ADMINISTRATOR BEFORE GO-LIVE.');
+    console.log('  Until then, every configuration route will refuse them with MFA_REQUIRED.');
+    console.log('  Change the seeded passwords too — they have been in an environment variable.');
   }
 
   console.log('\nDone.');

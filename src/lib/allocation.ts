@@ -306,6 +306,21 @@ export interface LineToAllocate {
    * that specific line is owed for it — not whoever the consumables rule names.
    */
   overrideAccountId?: string | null;
+
+  /**
+   * The supply-agreement levy on a vendor line: the share of this vendor's
+   * revenue that the hospital retains, under a signed agreement.
+   *
+   * THIS IS ONLY EVER SET FROM AN AGREEMENT BOTH PARTIES HAVE SIGNED. Where a
+   * vendor has no active agreement it is absent, and the vendor is paid in full
+   * — deducting an unagreed share of a supplier's money is not a default, it is
+   * a deduction nobody consented to.
+   *
+   * `basisPoints` is carried onto the resulting share so a distribution row can
+   * later be re-derived against the exact agreement that produced it, even after
+   * the agreement has been amended.
+   */
+  vendorLevy?: { accountId: string; basisPoints: number; agreementRef?: string } | null;
 }
 
 export interface LineAllocation {
@@ -356,7 +371,36 @@ export function allocateInvoice(params: {
     let rules: AllocationRule[];
 
     if (line.overrideAccountId) {
-      rules = [{ accountId: line.overrideAccountId, type: 'RESIDUAL', label: 'named beneficiary' }];
+      // A vendor line. If a SIGNED supply agreement is in force, the hospital's
+      // agreed share is taken here and the vendor receives the remainder; the
+      // two are percentage rules so the split is exact to the kobo. With no
+      // agreement, the vendor is paid in full.
+      if (line.vendorLevy && line.vendorLevy.basisPoints > 0) {
+        const levy = line.vendorLevy;
+        if (!Number.isInteger(levy.basisPoints) || levy.basisPoints < 0 || levy.basisPoints > BASIS_POINTS_TOTAL) {
+          throw new AllocationError(
+            `A supply-agreement levy of ${levy.basisPoints} basis points is not a share between 0% and 100%. Line ${line.lineId} has not been allocated.`
+          );
+        }
+        rules = [
+          {
+            accountId: levy.accountId,
+            type: 'PERCENTAGE',
+            shareBasisPoints: levy.basisPoints,
+            priority: 1,
+            label: levy.agreementRef ? `supply agreement ${levy.agreementRef}` : 'supply agreement levy',
+          },
+          {
+            accountId: line.overrideAccountId,
+            type: 'PERCENTAGE',
+            shareBasisPoints: BASIS_POINTS_TOTAL - levy.basisPoints,
+            priority: 1,
+            label: 'vendor share',
+          },
+        ];
+      } else {
+        rules = [{ accountId: line.overrideAccountId, type: 'RESIDUAL', label: 'named beneficiary' }];
+      }
     } else {
       const configured = rulesByChargeKind[line.chargeKind];
       if (configured && configured.length > 0) {

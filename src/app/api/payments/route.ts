@@ -43,6 +43,7 @@ import {
   statusAfterPayment,
 } from '@/lib/invoice';
 import { canTransition, PaymentStatus, TrustBasis } from '@/lib/payments/states';
+import { AgreementSnapshot, levyInForce } from '@/lib/agreements';
 
 export const dynamic = 'force-dynamic';
 
@@ -222,8 +223,21 @@ export async function POST(request: NextRequest) {
     const revenueTotal = revenueLines.reduce((s, l) => s + l.lineTotal, 0);
     const allocatableRevenue = Math.min(allocateNow, revenueTotal);
 
+    // A vendor line carries a levy ONLY where a supply agreement, signed by both
+    // the hospital and the vendor at this exact percentage, is in force today.
+    // Anything else — unsigned, suspended, expired, out of scope, or signed at a
+    // percentage that has since moved — yields no levy and the vendor is paid in
+    // full. lib/agreements.ts makes that decision; nothing is inferred here.
+    const levies = await resolveVendorLevies(revenueLines);
+
     const scaled = proRataLines(
-      revenueLines.map((l) => ({ lineId: l.id, chargeKind: l.kind as string, lineTotal: l.lineTotal, overrideAccountId: l.overrideAccountId })),
+      revenueLines.map((l) => ({
+        lineId: l.id,
+        chargeKind: l.kind as string,
+        lineTotal: l.lineTotal,
+        overrideAccountId: l.overrideAccountId,
+        vendorLevy: l.overrideAccountId ? (levies.get(`${l.overrideAccountId}::${l.kind}`) ?? null) : null,
+      })),
       allocatableRevenue,
       revenueTotal
     );
@@ -441,6 +455,73 @@ export async function POST(request: NextRequest) {
 }
 
 // ---------------------------------------------------------------------------
+
+/**
+ * The supply-agreement levy for each vendor line on this invoice.
+ *
+ * Keyed by `revenueAccountId::chargeKind`, because one vendor may supply two
+ * kinds under agreements of different scope. Lines whose vendor has no live,
+ * fully signed agreement are simply absent from the map, and the allocation
+ * engine then pays that vendor in full — the safe default, and the only honest
+ * one: an unagreed deduction from a supplier's money is not a configuration
+ * default, it is a deduction nobody consented to.
+ */
+async function resolveVendorLevies(
+  lines: { kind: string; overrideAccountId: string | null }[]
+): Promise<Map<string, { accountId: string; basisPoints: number; agreementRef: string }>> {
+  const out = new Map<string, { accountId: string; basisPoints: number; agreementRef: string }>();
+
+  const vendorAccountIds = Array.from(new Set(lines.map((l) => l.overrideAccountId).filter((x): x is string => Boolean(x))));
+  if (vendorAccountIds.length === 0) return out;
+
+  const vendors = await prisma.vendor.findMany({
+    where: { revenueAccountId: { in: vendorAccountIds } },
+    select: {
+      revenueAccountId: true,
+      agreements: {
+        where: { status: 'ACTIVE' },
+        include: { signatures: true },
+      },
+    },
+  });
+
+  const now = new Date();
+
+  for (const vendor of vendors) {
+    if (!vendor.revenueAccountId) continue;
+
+    for (const agreement of vendor.agreements) {
+      const snapshot: AgreementSnapshot = {
+        id: agreement.id,
+        levyBasisPoints: agreement.levyBasisPoints,
+        status: agreement.status as AgreementSnapshot['status'],
+        effectiveFrom: agreement.effectiveFrom,
+        effectiveTo: agreement.effectiveTo,
+        coveredKinds: agreement.coveredKinds as string[],
+        signatures: agreement.signatures.map((s) => ({
+          party: s.party as 'HOSPITAL' | 'VENDOR' | 'WITNESS',
+          consentGiven: s.consentGiven,
+          agreedLevyBasisPoints: s.agreedLevyBasisPoints,
+          signedAt: s.signedAt,
+          revokedAt: s.revokedAt,
+        })),
+      };
+
+      for (const kind of new Set(lines.filter((l) => l.overrideAccountId === vendor.revenueAccountId).map((l) => l.kind))) {
+        const verdict = levyInForce({ agreement: snapshot, chargeKind: kind, asOf: now });
+        if (verdict.basisPoints > 0) {
+          out.set(`${vendor.revenueAccountId}::${kind}`, {
+            accountId: agreement.levyAccountId,
+            basisPoints: verdict.basisPoints,
+            agreementRef: agreement.agreementNumber,
+          });
+        }
+      }
+    }
+  }
+
+  return out;
+}
 
 /** Rules in force today, keyed by charge kind (§41). */
 async function loadAllocationRules(): Promise<Record<string, AllocationRule[]>> {

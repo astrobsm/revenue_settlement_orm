@@ -312,25 +312,103 @@ describe('the consumables development levy', () => {
     expect(dev + cons).toBe(billed);
   });
 
-  it('does NOT levy a consignment line owed to a vendor', () => {
-    // A consignment consumable is the vendor's property until it is used; the
-    // money is owed to them for their goods. Deducting a hospital levy from it
-    // would be a unilateral 15% cut of a supplier's invoice, which is a
-    // commercial decision nobody has taken. Named beneficiary lines therefore
-    // bypass the levy — see the note in ARCHITECTURE.md §D-RESOLVED.
+  it('levies a vendor line under a SIGNED supply agreement', () => {
+    // This is what the levy is FOR: the vendor took over supply of the
+    // consumable, and agreed the hospital retains a share of the revenue.
     const r = allocateInvoice({
       lines: [
-        { lineId: 'own', chargeKind: 'CONSUMABLE', lineTotal: 80_000_00 },
-        { lineId: 'consigned', chargeKind: 'CONSUMABLE', lineTotal: 50_000_00, overrideAccountId: 'vendor-acme' },
+        {
+          lineId: 'consigned',
+          chargeKind: 'CONSUMABLE',
+          lineTotal: 50_000_00,
+          overrideAccountId: 'vendor-acme',
+          vendorLevy: { accountId: 'acct-hospital-development', basisPoints: 1500, agreementRef: 'CTR/AGR/2026/000004' },
+        },
       ],
       rulesByChargeKind: { CONSUMABLE: CONSUMABLE_RULES },
       fallbackAccountId: 'acct-hospital',
     });
     const by = new Map(r.rolledUp.map((s) => [s.accountId, s.amount]));
-    expect(by.get('vendor-acme')).toBe(50_000_00);
-    expect(by.get('acct-hospital-development')).toBe(12_000_00);
+    expect(by.get('acct-hospital-development')).toBe(7_500_00);
+    expect(by.get('vendor-acme')).toBe(42_500_00);
+    expect(r.allocated).toBe(50_000_00);
+  });
+
+  it('pays a vendor IN FULL where no agreement has been signed', () => {
+    // No signed agreement means no consent, and deducting an unagreed share of
+    // a supplier's money is not a default. lib/agreements.ts decides this; the
+    // engine simply receives no levy.
+    const r = allocateInvoice({
+      lines: [{ lineId: 'consigned', chargeKind: 'CONSUMABLE', lineTotal: 50_000_00, overrideAccountId: 'vendor-acme' }],
+      rulesByChargeKind: { CONSUMABLE: CONSUMABLE_RULES },
+      fallbackAccountId: 'acct-hospital',
+    });
+    expect(r.rolledUp.find((s) => s.accountId === 'vendor-acme')?.amount).toBe(50_000_00);
+    expect(r.rolledUp.find((s) => s.accountId === 'acct-hospital-development')).toBeUndefined();
+  });
+
+  it('honours a different negotiated percentage per vendor', () => {
+    // The share is a commercial term and differs between suppliers.
+    const r = allocateInvoice({
+      lines: [
+        { lineId: 'a', chargeKind: 'CONSUMABLE', lineTotal: 100_000_00, overrideAccountId: 'vendor-a', vendorLevy: { accountId: 'dev', basisPoints: 1500 } },
+        { lineId: 'b', chargeKind: 'CONSUMABLE', lineTotal: 100_000_00, overrideAccountId: 'vendor-b', vendorLevy: { accountId: 'dev', basisPoints: 2500 } },
+      ],
+      rulesByChargeKind: { CONSUMABLE: CONSUMABLE_RULES },
+      fallbackAccountId: 'acct-hospital',
+    });
+    const by = new Map(r.rolledUp.map((s) => [s.accountId, s.amount]));
+    expect(by.get('vendor-a')).toBe(85_000_00);
+    expect(by.get('vendor-b')).toBe(75_000_00);
+    expect(by.get('dev')).toBe(40_000_00); // 15,000 + 25,000
+    expect(r.allocated).toBe(200_000_00);
+  });
+
+  it('splits a vendor levy exactly on awkward amounts', () => {
+    for (let amount = 1; amount <= 1000; amount++) {
+      const r = allocateInvoice({
+        lines: [{ lineId: 'x', chargeKind: 'CONSUMABLE', lineTotal: amount, overrideAccountId: 'v', vendorLevy: { accountId: 'dev', basisPoints: 1500 } }],
+        rulesByChargeKind: { CONSUMABLE: CONSUMABLE_RULES },
+        fallbackAccountId: 'acct-hospital',
+      });
+      expect(r.allocated).toBe(amount);
+    }
+  });
+
+  it('mixes hospital-owned and vendor consumables on one bill, exactly', () => {
+    const r = allocateInvoice({
+      lines: [
+        { lineId: 'own', chargeKind: 'CONSUMABLE', lineTotal: 80_000_00 },
+        { lineId: 'consigned', chargeKind: 'CONSUMABLE', lineTotal: 50_000_00, overrideAccountId: 'vendor-acme', vendorLevy: { accountId: 'acct-hospital-development', basisPoints: 1500 } },
+      ],
+      rulesByChargeKind: { CONSUMABLE: CONSUMABLE_RULES },
+      fallbackAccountId: 'acct-hospital',
+    });
+    const by = new Map(r.rolledUp.map((s) => [s.accountId, s.amount]));
+    // 12,000 from hospital stock + 7,500 from the vendor line.
+    expect(by.get('acct-hospital-development')).toBe(19_500_00);
     expect(by.get('acct-consumables')).toBe(68_000_00);
+    expect(by.get('vendor-acme')).toBe(42_500_00);
     expect(r.allocated).toBe(130_000_00);
+  });
+
+  it('a zero-percent agreement pays the vendor in full', () => {
+    const r = allocateInvoice({
+      lines: [{ lineId: 'x', chargeKind: 'CONSUMABLE', lineTotal: 50_000_00, overrideAccountId: 'v', vendorLevy: { accountId: 'dev', basisPoints: 0 } }],
+      rulesByChargeKind: { CONSUMABLE: CONSUMABLE_RULES },
+      fallbackAccountId: 'acct-hospital',
+    });
+    expect(r.rolledUp.find((s) => s.accountId === 'v')?.amount).toBe(50_000_00);
+  });
+
+  it('refuses a levy that is not a share between 0 and 100 per cent', () => {
+    expect(() =>
+      allocateInvoice({
+        lines: [{ lineId: 'x', chargeKind: 'CONSUMABLE', lineTotal: 1000, overrideAccountId: 'v', vendorLevy: { accountId: 'dev', basisPoints: 12_000 } }],
+        rulesByChargeKind: { CONSUMABLE: CONSUMABLE_RULES },
+        fallbackAccountId: 'acct-hospital',
+      })
+    ).toThrow(/between 0% and 100%/);
   });
 });
 

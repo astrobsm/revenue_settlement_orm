@@ -28,6 +28,7 @@ export const Series = {
   REFUND: 'RFD',
   DEPOSIT: 'DEP',
   ADJUSTMENT: 'ADJ',
+  AGREEMENT: 'AGR',
 } as const;
 
 export type SeriesValue = (typeof Series)[keyof typeof Series];

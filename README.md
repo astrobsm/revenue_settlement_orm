@@ -21,7 +21,7 @@ SERVICE → PRICE → INVOICE → PAYMENT → VERIFICATION → ALLOCATION
 written.** See [Build state](#build-state) for exactly what exists.
 
 ```
-157 passed, 0 failed        npm test
+207 passed, 0 failed        npm test
 schema valid                npx prisma validate
 strict typecheck clean      npx tsc --noEmit
 ```
@@ -133,18 +133,21 @@ fails the build rather than quietly opening a door:
 | Area | Module | Tests |
 |---|---|---|
 | Kobo arithmetic, naira formatting | [src/lib/money.ts](src/lib/money.ts) | — |
-| Allocation engine — fixed, tiered, percentage, residual | [src/lib/allocation.ts](src/lib/allocation.ts) | 32 |
+| Allocation engine — fixed, tiered, percentage, residual | [src/lib/allocation.ts](src/lib/allocation.ts) | 53 |
 | Consolidated bill, status, overrides, allocation timing | [src/lib/invoice.ts](src/lib/invoice.ts) | 47 |
 | Double-entry ledger | [src/lib/ledger.ts](src/lib/ledger.ts) | 27 |
 | Roles, permissions, separation of duties | [src/lib/rbac.ts](src/lib/rbac.ts) | 27 |
 | Payment state machine and trust basis | [src/lib/payments/states.ts](src/lib/payments/states.ts) | 24 |
-| Pro-rata part payments | `proRataLines()` in allocation.ts | in the 47 |
-| Full database schema (34 models) | [prisma/schema.prisma](prisma/schema.prisma) | validates |
+| Pro-rata part payments | `proRataLines()` in allocation.ts | in the 53 |
+| Vendor supply agreements: levy, signatures, consent | [src/lib/agreements.ts](src/lib/agreements.ts) | 29 |
+| Bank-detail encryption and masking | [src/lib/crypto.ts](src/lib/crypto.ts) | — |
+| Full database schema (36 models) | [prisma/schema.prisma](prisma/schema.prisma) | validates |
 | Migrations, incl. database-level append-only triggers | [prisma/migrations/](prisma/migrations/) | — |
 | Seed: catalogue, accounts, rules, providers, policy | [prisma/seed.ts](prisma/seed.ts) | — |
 | ORM read client | [src/lib/orm/client.ts](src/lib/orm/client.ts) | — |
 | Auth, route guard, audit trail, idempotency, numbering | [src/lib/](src/lib/) | — |
 | `POST /api/invoices`, `POST /api/payments` | [src/app/api/](src/app/api/) | — |
+| Settings: revenue-account bank details, vendor agreements | [src/app/api/settings/](src/app/api/settings/) | — |
 
 The append-only rule is enforced by **database triggers**, not only in
 TypeScript: an application rule is bypassed by `psql`, by a migration script, and
@@ -194,6 +197,38 @@ by the test that asserts it.
 deposit is money the hospital *holds*, not money it has *earned*. Booking it as
 revenue on receipt overstates income. It is drawn down as services are actually
 consumed, and the remaining balance is always the patient's.
+
+---
+
+## The vendor supply levy
+
+Where a vendor takes over supply of a consumable, they agree that the hospital
+retains a share of the revenue billed for it — 15% by default, into the hospital
+development fund. It is a **negotiated commercial term**, so it is editable per
+vendor. What it is not is unilateral.
+
+Three rules make that real, and all three are enforced in the domain layer, in
+the API, and by database trigger:
+
+**A levy applies only when both parties have signed.** No signature, a revoked
+signature, a suspended or expired agreement, or a charge kind the agreement does
+not cover — each yields a levy of **zero**, and the vendor is paid in full.
+Deducting an unagreed share of a supplier's money is not a configuration
+default.
+
+**A signature is against a specific percentage.** If the figure moves after
+signing, the signature is *stale*, not merely present, and the levy stops until
+both parties sign again. This is the case the whole mechanism exists to catch.
+
+**A signed percentage cannot be edited.** Changing 15% to 20% on an agreement the
+vendor has already signed would mean they signed one number while another is
+applied to their money. Amending therefore raises a **new version** that both
+parties sign — and the existing agreement stays in force until they do, so
+supply is never left ungoverned in the gap.
+
+Consent is recorded separately from the signature image: one proves *who*, the
+other proves *they were shown these terms at this percentage and accepted them*.
+The exact wording each party agreed to is stored on their signature.
 
 **Instructing a settlement moves nothing.** There is deliberately no ledger entry
 for "settlement initiated". Telling a bank to transfer is not a transfer, and

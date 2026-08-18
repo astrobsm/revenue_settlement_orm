@@ -139,3 +139,86 @@ ALTER TABLE "payments"        ADD CONSTRAINT payments_gateway_needs_provider_ref
 CREATE UNIQUE INDEX payments_provider_txn_unique
   ON "payments" ("providerId", "providerTransactionId")
   WHERE "providerTransactionId" IS NOT NULL;
+
+-- ============================================================================
+-- Supply agreements: consent is a database constraint, not a convention
+-- ----------------------------------------------------------------------------
+-- The levy is a deduction from a supplier's money. lib/agreements.ts refuses to
+-- apply one without two live signatures at the stated percentage — but that is
+-- application logic, and this table can be written to by a migration, by psql,
+-- or by a future route that forgets. So the rule is asserted here too.
+-- ============================================================================
+
+-- A signature is a record of consent at a MOMENT. It is never edited: a change
+-- of mind is a revocation (revokedAt), which leaves the original consent visible.
+CREATE OR REPLACE FUNCTION agreement_signatures_immutable() RETURNS TRIGGER AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'A signature cannot be deleted. Revoke it instead, so the record still shows that consent was given and then withdrawn.'
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+
+  -- Everything except the revocation fields is frozen once signed. In
+  -- particular agreedLevyBasisPoints: rewriting it would make a signature
+  -- collected at 15% appear to consent to 20%, which is the precise
+  -- misrepresentation this whole mechanism exists to prevent.
+  IF OLD."signedAt" IS NOT NULL AND
+     (NEW."party", NEW."signatoryName", NEW."agreedLevyBasisPoints",
+      NEW."consentStatement", NEW."consentGiven", NEW."signedAt")
+     IS DISTINCT FROM
+     (OLD."party", OLD."signatoryName", OLD."agreedLevyBasisPoints",
+      OLD."consentStatement", OLD."consentGiven", OLD."signedAt")
+  THEN
+    RAISE EXCEPTION
+      'A signature is frozen once given: only its revocation may be recorded. To change the agreed percentage, raise a new agreement version and have both parties sign it.'
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER agreement_signatures_frozen
+  BEFORE UPDATE OR DELETE ON "agreement_signatures"
+  FOR EACH ROW EXECUTE FUNCTION agreement_signatures_immutable();
+
+-- An active agreement must carry a live, unrevoked, consenting signature from
+-- BOTH parties, each given at the percentage the agreement currently states.
+CREATE OR REPLACE FUNCTION agreement_activation_requires_signatures() RETURNS TRIGGER AS $$
+DECLARE
+  valid_signatures INT;
+BEGIN
+  IF NEW."status" <> 'ACTIVE' THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT COUNT(DISTINCT s."party") INTO valid_signatures
+  FROM "agreement_signatures" s
+  WHERE s."agreementId" = NEW."id"
+    AND s."party" IN ('HOSPITAL', 'VENDOR')
+    AND s."consentGiven" = TRUE
+    AND s."signedAt" IS NOT NULL
+    AND s."revokedAt" IS NULL
+    AND s."agreedLevyBasisPoints" = NEW."levyBasisPoints";
+
+  IF valid_signatures < 2 THEN
+    RAISE EXCEPTION
+      'This agreement cannot be made active: it needs a current signature from both the hospital and the vendor, each given at % basis points. No levy may be taken from a supplier who has not agreed to it.',
+      NEW."levyBasisPoints"
+      USING ERRCODE = 'restrict_violation';
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER vendor_agreements_active_needs_signatures
+  BEFORE INSERT OR UPDATE ON "vendor_agreements"
+  FOR EACH ROW EXECUTE FUNCTION agreement_activation_requires_signatures();
+
+-- A share is a share: between nothing and everything.
+ALTER TABLE "vendor_agreements" ADD CONSTRAINT vendor_agreements_levy_is_a_share
+  CHECK ("levyBasisPoints" >= 0 AND "levyBasisPoints" <= 10000);
+
+ALTER TABLE "agreement_signatures" ADD CONSTRAINT agreement_signatures_levy_is_a_share
+  CHECK ("agreedLevyBasisPoints" >= 0 AND "agreedLevyBasisPoints" <= 10000);

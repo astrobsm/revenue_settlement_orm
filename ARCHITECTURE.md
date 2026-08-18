@@ -276,6 +276,19 @@ literally would mean an engine that loses ₦15,000 on that invoice, which
 `allocate()` refuses to do by construction. Asserted in
 `scripts/tests/allocation.test.ts` so nobody "fixes" it back.
 
+**The consumables levy applies to vendor supply — corrected.** An earlier
+draft of this document exempted consignment lines from the levy, reasoning that
+deducting from vendor-owned stock would be a unilateral cut of a supplier’s
+invoice. That was wrong about the commercial reality: the levy IS the vendor’s
+agreement with the hospital, the consideration for being allowed to take over
+supply of the consumable. It therefore applies squarely to vendor revenue.
+
+The concern behind the earlier reasoning was still sound, and is now answered
+properly rather than by exemption: no levy is taken from any vendor who has not
+signed an agreement to it, at that exact percentage. Consent is the control, not
+scope. See lib/agreements.ts and the vendor_agreements_active_needs_signatures
+trigger.
+
 **§15 is honoured strictly.** There is no per-individual revenue account type.
 Professional fees route to a `PROFESSIONAL_POOL` institutional account; onward
 distribution to a named surgeon is a payroll decision made outside this system.

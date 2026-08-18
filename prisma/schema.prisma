@@ -784,6 +784,190 @@ model RevenueAccount {
   @@map("revenue_accounts")
 }
 
+// ============================================================================
+// VENDORS AND SUPPLY AGREEMENTS (§15, §22, §41, §50)
+// ----------------------------------------------------------------------------
+// A vendor that takes over supply of a consumable line agrees to pay the
+// hospital a share of the revenue from it. That share is NEGOTIATED, it differs
+// between vendors, and it is a CONTRACT — so three things follow, and all three
+// are structural here rather than left to good intentions.
+//
+// 1. THE PERCENTAGE IS EDITABLE. It is a commercial term, not a constant.
+//
+// 2. IT TAKES EFFECT ONLY WHEN BOTH PARTIES HAVE SIGNED. Until the hospital and
+//    the vendor have each signed, the levy is ZERO and the vendor is paid in
+//    full. Deducting an unagreed share of a supplier's money is not a
+//    configuration default; it is a deduction nobody consented to.
+//
+// 3. A SIGNED PERCENTAGE CANNOT BE EDITED. Changing 15% to 20% on an agreement
+//    the vendor has already signed would mean they signed one number while a
+//    different one is applied to their money. So an amendment SUPERSEDES: a new
+//    agreement version is raised, both parties sign again, and the old one is
+//    closed with an effectiveTo. This is the same effective-dating discipline
+//    tariffs and allocation rules follow (§41), for the same reason — an invoice
+//    settled last year must still explain the split it actually used.
+// ============================================================================
+
+model Vendor {
+  id String @id @default(uuid())
+
+  code String @unique
+  name String
+
+  contactName  String?
+  contactEmail String?
+  contactPhone String?
+  address      String?
+
+  /// Their registration, for the agreement and for tax reporting.
+  rcNumber  String?
+  tinNumber String?
+
+  /// Where this vendor is paid. Bank details live on the revenue account, where
+  /// they are encrypted and their change is approved and audited (§14).
+  revenueAccountId String?
+
+  isActive Boolean @default(true)
+
+  agreements VendorAgreement[]
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([isActive])
+  @@map("vendors")
+}
+
+enum AgreementStatus {
+  /// Being drafted. The percentage may still be edited freely.
+  DRAFT
+  /// Sent for signature. The percentage is FROZEN from this point.
+  AWAITING_SIGNATURES
+  /// Both parties have signed. Only now does the levy apply.
+  ACTIVE
+  /// Temporarily not applied — a dispute, or a supply suspension.
+  SUSPENDED
+  /// Replaced by a later version. Kept for ever; never deleted.
+  SUPERSEDED
+  /// Ended by either party.
+  TERMINATED
+  /// Ran past its effectiveTo without renewal.
+  EXPIRED
+}
+
+/// One supply agreement between the hospital and one vendor.
+model VendorAgreement {
+  id String @id @default(uuid())
+
+  agreementNumber String @unique
+
+  vendorId String
+  vendor   Vendor @relation(fields: [vendorId], references: [id])
+
+  /// THE NEGOTIATED SHARE, in basis points. 1500 = 15%.
+  ///
+  /// Editable while DRAFT. Frozen once sent for signature, because this is the
+  /// number the vendor is being asked to agree to. Changing it afterwards means
+  /// raising a new version — see supersededById.
+  levyBasisPoints Int
+
+  /// Where the hospital's share goes. Normally the development fund.
+  levyAccountId String
+
+  /// Which charge kinds this agreement covers. A vendor supplying only implants
+  /// should not have a levy taken from unrelated consumables.
+  coveredKinds ChargeKind[]
+
+  status AgreementStatus @default(DRAFT)
+
+  /// The terms as agreed, kept verbatim so a reprint years later is the document
+  /// that was actually signed.
+  termsText String?
+  title     String?
+
+  effectiveFrom DateTime  @db.Date
+  effectiveTo   DateTime? @db.Date
+
+  /// Set when a later version replaces this one. The old row is NEVER edited
+  /// beyond closing it — an amended agreement is a new document.
+  supersededById       String?   @unique
+  supersedesAgreementId String?
+  supersededAt         DateTime?
+
+  /// Set only when BOTH required signatures are present. The application refuses
+  /// to activate without them, and the database refuses too — see the
+  /// vendor_agreements_active_needs_signatures constraint.
+  activatedAt   DateTime?
+  activatedById String?
+
+  terminatedAt   DateTime?
+  terminatedById String?
+  terminationReason String?
+
+  signatures AgreementSignature[]
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([vendorId, status])
+  @@index([status, effectiveFrom])
+  @@map("vendor_agreements")
+}
+
+enum SignatoryParty {
+  HOSPITAL
+  VENDOR
+  WITNESS
+}
+
+/// One party's signature and consent.
+///
+/// Append-only: a signature that can be edited is not a signature. Withdrawing
+/// consent inserts a revocation rather than deleting the row, so the record still
+/// shows that it was given and then withdrawn.
+model AgreementSignature {
+  id String @id @default(uuid())
+
+  agreementId String
+  agreement   VendorAgreement @relation(fields: [agreementId], references: [id], onDelete: Cascade)
+
+  party SignatoryParty
+
+  /// Who signed, as it should appear on the printed agreement.
+  signatoryName        String
+  signatoryDesignation String?
+  signatoryEmail       String?
+
+  /// Set for the hospital side: the user account that signed.
+  signedByUserId String?
+
+  /// The drawn or uploaded signature image, as a data URL, matching how the rest
+  /// of the estate handles evidence.
+  signatureDataUrl String?
+
+  /// What was agreed to, captured at the moment of signing. If the agreement is
+  /// later amended, this still shows the percentage THIS person consented to.
+  agreedLevyBasisPoints Int
+
+  /// Explicit consent, separate from the signature image: a signature proves who,
+  /// this proves they were shown the terms and accepted them.
+  consentStatement String?
+  consentGiven     Boolean @default(false)
+
+  signedAt  DateTime @default(now())
+  /// Evidence, never a credential.
+  ipAddress String?
+
+  revokedAt     DateTime?
+  revokedReason String?
+
+  @@unique([agreementId, party])
+  @@index([agreementId])
+  @@map("agreement_signatures")
+}
+
 /// §13's four allocation types.
 enum AllocationRuleType {
   FIXED

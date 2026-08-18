@@ -26,6 +26,12 @@ CREATE TYPE "PaymentChannel" AS ENUM ('CARD', 'BANK_TRANSFER', 'USSD', 'POS', 'P
 CREATE TYPE "BeneficiaryType" AS ENUM ('HOSPITAL', 'HOSPITAL_DEVELOPMENT', 'DEPARTMENT', 'THEATRE', 'PHARMACY', 'LABORATORY', 'RADIOLOGY', 'CSSD', 'BLOOD_BANK', 'PROFESSIONAL_POOL', 'CONSUMABLE_PROVIDER', 'EXTERNAL_VENDOR', 'COST_CENTRE');
 
 -- CreateEnum
+CREATE TYPE "AgreementStatus" AS ENUM ('DRAFT', 'AWAITING_SIGNATURES', 'ACTIVE', 'SUSPENDED', 'SUPERSEDED', 'TERMINATED', 'EXPIRED');
+
+-- CreateEnum
+CREATE TYPE "SignatoryParty" AS ENUM ('HOSPITAL', 'VENDOR', 'WITNESS');
+
+-- CreateEnum
 CREATE TYPE "AllocationRuleType" AS ENUM ('FIXED', 'TIERED', 'PERCENTAGE', 'RESIDUAL');
 
 -- CreateEnum
@@ -368,6 +374,75 @@ CREATE TABLE "revenue_accounts" (
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "revenue_accounts_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "vendors" (
+    "id" TEXT NOT NULL,
+    "code" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "contactName" TEXT,
+    "contactEmail" TEXT,
+    "contactPhone" TEXT,
+    "address" TEXT,
+    "rcNumber" TEXT,
+    "tinNumber" TEXT,
+    "revenueAccountId" TEXT,
+    "isActive" BOOLEAN NOT NULL DEFAULT true,
+    "createdById" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "vendors_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "vendor_agreements" (
+    "id" TEXT NOT NULL,
+    "agreementNumber" TEXT NOT NULL,
+    "vendorId" TEXT NOT NULL,
+    "levyBasisPoints" INTEGER NOT NULL,
+    "levyAccountId" TEXT NOT NULL,
+    "coveredKinds" "ChargeKind"[],
+    "status" "AgreementStatus" NOT NULL DEFAULT 'DRAFT',
+    "termsText" TEXT,
+    "title" TEXT,
+    "effectiveFrom" DATE NOT NULL,
+    "effectiveTo" DATE,
+    "supersededById" TEXT,
+    "supersedesAgreementId" TEXT,
+    "supersededAt" TIMESTAMP(3),
+    "activatedAt" TIMESTAMP(3),
+    "activatedById" TEXT,
+    "terminatedAt" TIMESTAMP(3),
+    "terminatedById" TEXT,
+    "terminationReason" TEXT,
+    "createdById" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "vendor_agreements_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "agreement_signatures" (
+    "id" TEXT NOT NULL,
+    "agreementId" TEXT NOT NULL,
+    "party" "SignatoryParty" NOT NULL,
+    "signatoryName" TEXT NOT NULL,
+    "signatoryDesignation" TEXT,
+    "signatoryEmail" TEXT,
+    "signedByUserId" TEXT,
+    "signatureDataUrl" TEXT,
+    "agreedLevyBasisPoints" INTEGER NOT NULL,
+    "consentStatement" TEXT,
+    "consentGiven" BOOLEAN NOT NULL DEFAULT false,
+    "signedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "ipAddress" TEXT,
+    "revokedAt" TIMESTAMP(3),
+    "revokedReason" TEXT,
+
+    CONSTRAINT "agreement_signatures_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -819,6 +894,30 @@ CREATE UNIQUE INDEX "revenue_accounts_code_key" ON "revenue_accounts"("code");
 CREATE INDEX "revenue_accounts_beneficiaryType_isActive_idx" ON "revenue_accounts"("beneficiaryType", "isActive");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "vendors_code_key" ON "vendors"("code");
+
+-- CreateIndex
+CREATE INDEX "vendors_isActive_idx" ON "vendors"("isActive");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "vendor_agreements_agreementNumber_key" ON "vendor_agreements"("agreementNumber");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "vendor_agreements_supersededById_key" ON "vendor_agreements"("supersededById");
+
+-- CreateIndex
+CREATE INDEX "vendor_agreements_vendorId_status_idx" ON "vendor_agreements"("vendorId", "status");
+
+-- CreateIndex
+CREATE INDEX "vendor_agreements_status_effectiveFrom_idx" ON "vendor_agreements"("status", "effectiveFrom");
+
+-- CreateIndex
+CREATE INDEX "agreement_signatures_agreementId_idx" ON "agreement_signatures"("agreementId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "agreement_signatures_agreementId_party_key" ON "agreement_signatures"("agreementId", "party");
+
+-- CreateIndex
 CREATE INDEX "allocation_rules_kind_effectiveFrom_idx" ON "allocation_rules"("kind", "effectiveFrom");
 
 -- CreateIndex
@@ -997,6 +1096,12 @@ ALTER TABLE "payment_transactions" ADD CONSTRAINT "payment_transactions_paymentI
 
 -- AddForeignKey
 ALTER TABLE "payment_transactions" ADD CONSTRAINT "payment_transactions_providerId_fkey" FOREIGN KEY ("providerId") REFERENCES "payment_providers"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "vendor_agreements" ADD CONSTRAINT "vendor_agreements_vendorId_fkey" FOREIGN KEY ("vendorId") REFERENCES "vendors"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "agreement_signatures" ADD CONSTRAINT "agreement_signatures_agreementId_fkey" FOREIGN KEY ("agreementId") REFERENCES "vendor_agreements"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "allocation_rules" ADD CONSTRAINT "allocation_rules_accountId_fkey" FOREIGN KEY ("accountId") REFERENCES "revenue_accounts"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
