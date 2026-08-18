@@ -1,0 +1,20 @@
+node_modules/
+.next/
+out/
+build/
+dist/
+
+# Secrets. Every one of these is a key to real money.
+.env
+.env.local
+.env*.local
+*.pem
+
+npm-debug.log*
+yarn-error.log*
+.DS_Store
+Thumbs.db
+
+tsconfig.tsbuildinfo
+next-env.d.ts
+coverage/

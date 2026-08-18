@@ -1,0 +1,1606 @@
+// ============================================================================
+// CENTRAL THEATRE REVENUE — schema
+// ----------------------------------------------------------------------------
+// Revenue collection, payment and automated revenue allocation for UNTH Ituku
+// Ozalla. A standalone application with its own database, integrating with the
+// Operative Resource Manager (ORM) over its API. It NEVER writes to ORM's
+// schema: clinical records belong to the clinical system.
+//
+// FOUR RULES GOVERN EVERYTHING BELOW.
+//
+// 1. MONEY IS INTEGER KOBO. Every amount is `Int`, named in kobo, never Float
+//    and never Decimal. A surgical invoice carries forty lines; float addition
+//    over forty lines drifts, and one drifting kobo per invoice is a ledger that
+//    will not reconcile and nobody can explain.
+//
+// 2. FINANCIAL HISTORY IS APPEND-ONLY. Nothing that records money is updated
+//    destructively. A correction is a NEW compensating record that references
+//    the original (§18, §23). That is why there is no `amount` column anywhere
+//    that a route is expected to overwrite, and why LedgerEntry has no
+//    updatedAt.
+//
+// 3. PRICES AND RULES ARE EFFECTIVE-DATED, NEVER EDITED IN PLACE. A bill raised
+//    last year must still explain its own figures under last year's tariff and
+//    last year's allocation rules (§40, §41). Superseding writes `effectiveTo`
+//    on the old row and inserts a new one.
+//
+// 4. WHAT WAS CHARGED IS CAPTURED ONTO THE INVOICE LINE. InvoiceLine.unitPrice
+//    is the price as at billing, not a live lookup through tariffId. The
+//    relation exists to explain the figure, not to produce it.
+//
+// ID TYPES. Everything here is `String @id @default(uuid())`. ORM's own ids are
+// stored as opaque TEXT in `ormRef` fields — never as foreign keys, because the
+// two databases are separate and a cross-database FK is not a thing.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// PEOPLE AND ACCESS (§24, §25)
+// ============================================================================
+
+/// §24's offices, named as this hospital names them. A user holds one or more
+/// through RoleAssignment; the combination is reviewed at assignment time
+/// against §25 (see lib/rbac.ts reviewRoleCombination).
+enum RevenueRole {
+  REVENUE_OFFICER
+  CASHIER
+  FINANCE_OFFICER
+  FINANCE_ADMINISTRATOR
+  AUDITOR
+  SUPER_ADMINISTRATOR
+  // Service originators: may request charges, never price or confirm them.
+  SURGEON
+  ANAESTHETIST
+  PHARMACY
+  STORES
+  LABORATORY
+}
+
+enum UserStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  DISABLED
+}
+
+model User {
+  id String @id @default(uuid())
+
+  email    String @unique
+  fullName String
+  /// Bcrypt. Never a raw password, and never logged.
+  passwordHash String
+
+  /// Staff number as the hospital knows it — appears on printed vouchers.
+  staffNumber String?
+  designation String?
+
+  status UserStatus @default(PENDING)
+
+  /// MFA is REQUIRED for anyone holding a financial-administration role (§42).
+  /// Enforced in the auth layer, recorded here.
+  mfaEnabled     Boolean @default(false)
+  mfaSecret      String?
+  lastLoginAt    DateTime?
+  failedLogins   Int      @default(0)
+  lockedUntil    DateTime?
+
+  roles RoleAssignment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@map("users")
+}
+
+model RoleAssignment {
+  id     String      @id @default(uuid())
+  userId String
+  user   User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   RevenueRole
+
+  /// Who granted it, and why. A role that appeared without explanation is the
+  /// first thing an auditor asks about.
+  grantedById String?
+  reason      String?
+
+  isActive  Boolean   @default(true)
+  grantedAt DateTime  @default(now())
+  revokedAt DateTime?
+  revokedById String?
+
+  @@unique([userId, role])
+  @@index([role, isActive])
+  @@map("role_assignments")
+}
+
+// ============================================================================
+// SERVICE CATALOGUE AND PRICES (§5, §40)
+// ============================================================================
+
+/// §5's categories, as routing keys. Deposits are distinguished here rather than
+/// by name, because §21 turns on the distinction: money taken against a deposit
+/// kind is a LIABILITY, not revenue.
+enum ChargeKind {
+  PROFESSIONAL_SURGEON
+  PROFESSIONAL_ANAESTHETIST
+  PROFESSIONAL_OTHER
+  THEATRE
+  ANAESTHESIA_DRUG
+  ANAESTHESIA_CONSUMABLE
+  DRUG
+  IV_FLUID
+  CONSUMABLE
+  IMPLANT
+  CSSD
+  ADMISSION_DEPOSIT
+  BED_CHARGE
+  NURSING
+  INVESTIGATION_LAB
+  INVESTIGATION_IMAGING
+  BLOOD
+  OXYGEN
+  RECOVERY
+  POSTOP_SERVICE
+  OTHER
+}
+
+/// A catalogue entry. WHAT a thing is, not what it costs — the price lives in
+/// Tariff so it can be versioned without rewriting the catalogue (§40).
+model Service {
+  id String @id @default(uuid())
+
+  /// Stable business key, e.g. "THEATRE-MAJOR". Referenced by charges.
+  code String     @unique
+  name String
+  kind ChargeKind
+
+  description String?
+  /// "each", "pack", "day", "session".
+  unit        String  @default("each")
+
+  categoryId String?
+  category   ServiceCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  quantityAllowed  Boolean @default(true)
+  discountEligible Boolean @default(true)
+  /// Basis points. Overrides the institutional default where a service differs.
+  taxBasisPoints   Int?
+
+  /// Set where a service may only be charged by a specific provider type (§5).
+  requiresProviderRole RevenueRole?
+  /// High-value services can be made to require approval before they are billed.
+  requiresApproval     Boolean @default(false)
+
+  isActive Boolean @default(true)
+
+  tariffs      Tariff[]
+  invoiceLines InvoiceLine[]
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([kind, isActive])
+  @@map("services")
+}
+
+model ServiceCategory {
+  id   String @id @default(uuid())
+  code String @unique
+  name String
+  description String?
+  sortOrder   Int     @default(0)
+  isActive    Boolean @default(true)
+
+  services Service[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("service_categories")
+}
+
+/// A price, valid over a period. NEVER edited in place (§40).
+///
+/// Superseding a price writes `effectiveTo` on the old row and inserts a new
+/// one. That is what lets an invoice from last year reprice to what it actually
+/// charged, and what makes "who raised this fee, when, and why" answerable.
+model Tariff {
+  id String @id @default(uuid())
+
+  serviceId String
+  service   Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  /// Kobo.
+  amount   Int
+  currency String @default("NGN")
+
+  /// effectiveTo null means "still current".
+  effectiveFrom DateTime  @db.Date
+  effectiveTo   DateTime? @db.Date
+
+  /// Why the price changed. An unexplained rise is what an auditor asks about.
+  reason String?
+
+  /// A price change is a controlled act: who set it, and who approved it (§22).
+  createdById  String?
+  approvedById String?
+  approvedAt   DateTime?
+
+  invoiceLines InvoiceLine[]
+
+  createdAt DateTime @default(now())
+
+  @@index([serviceId, effectiveFrom])
+  @@map("tariffs")
+}
+
+// ============================================================================
+// PATIENTS AND ENCOUNTERS
+// ----------------------------------------------------------------------------
+// A LOCAL MIRROR of what ORM knows, not a second clinical record. Only what a
+// bill needs: who the patient is, and which episode of care the charges belong
+// to. `ormRef` is the id ORM uses, kept so any figure can be traced back.
+// ============================================================================
+
+model Patient {
+  id String @id @default(uuid())
+
+  /// ORM's patient id. The join key between the two systems.
+  ormRef String @unique
+
+  /// Denormalised so a printed bill still reads correctly after a later
+  /// correction upstream. A reprinted receipt must match the one issued.
+  fullName     String
+  hospitalNumber String?
+  folderNumber String?
+  phone        String?
+  email        String?
+
+  encounters Encounter[]
+  invoices   Invoice[]
+  deposits   Deposit[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([hospitalNumber])
+  @@map("patients")
+}
+
+/// One episode of care — an admission, or a surgical booking and its stay.
+///
+/// This is what makes §7's ONE CONSOLIDATED BILL possible: theatre, anaesthesia,
+/// pharmacy, consumables and admission all hang off the encounter, so they can
+/// be billed together rather than seven times.
+model Encounter {
+  id String @id @default(uuid())
+
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id])
+
+  /// ORM's surgery/booking/admission id, where this came from.
+  ormRef     String?
+  ormKind    String?
+
+  encounterNumber String  @unique
+  /// Retrieved from ORM at bill time (§38) — the procedure, theatre and team.
+  procedure     String?
+  theatre       String?
+  surgeonName   String?
+  anaesthetistName String?
+  serviceDate   DateTime?
+
+  invoices Invoice[]
+  charges  Charge[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([patientId])
+  @@index([ormRef])
+  @@map("encounters")
+}
+
+// ============================================================================
+// CHARGES — what departments raise, before it becomes a bill
+// ----------------------------------------------------------------------------
+// §6's shopping list and every departmental charge land here first. A charge is
+// a REQUEST to bill; it becomes an InvoiceLine when a bill is assembled. Keeping
+// them separate is what lets a surgeon add a consumable without being able to
+// issue a payable invoice (§24).
+// ============================================================================
+
+enum ChargeStatus {
+  DRAFT
+  SUBMITTED
+  AWAITING_APPROVAL
+  APPROVED
+  BILLED
+  REJECTED
+  CANCELLED
+}
+
+model Charge {
+  id String @id @default(uuid())
+
+  encounterId String
+  encounter   Encounter @relation(fields: [encounterId], references: [id], onDelete: Cascade)
+
+  serviceId String?
+  kind      ChargeKind
+  description String
+
+  /// What was USED, never what was requested, issued or wasted. A dropped vial
+  /// is the hospital's loss, not a line on a patient's bill.
+  quantity  Int
+  /// Kobo, CAPTURED when the charge was raised (§40).
+  unitPrice Int
+  lineTotal Int
+
+  tariffId String?
+
+  /// Where it came from, so every charge traces to the thing that caused it.
+  sourceKind String
+  sourceRef  String
+
+  /// Set when this line is owed to a named beneficiary — consignment stock is
+  /// the vendor's until it is used, and that transfer IS the billable event.
+  overrideAccountId String?
+
+  status ChargeStatus @default(DRAFT)
+
+  /// A price override keeps BOTH figures and a reason, always (§22).
+  originalUnitPrice Int?
+  overrideReason    String?
+  overrideRequestedById String?
+  overrideApprovedById  String?
+  overrideApprovedAt    DateTime?
+
+  requestedById String?
+  requestedAt   DateTime @default(now())
+
+  invoiceLine InvoiceLine?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([encounterId, status])
+  @@index([kind])
+  @@map("charges")
+}
+
+// ============================================================================
+// INVOICES (§7, §23, §44)
+// ============================================================================
+
+enum InvoiceStatus {
+  DRAFT
+  AWAITING_APPROVAL
+  ISSUED
+  PARTIALLY_PAID
+  PAID
+  OVERPAID
+  CANCELLED
+  REFUNDED
+}
+
+/// ONE consolidated bill (§7). One total, one payment.
+model Invoice {
+  id            String @id @default(uuid())
+  invoiceNumber String @unique
+
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id])
+
+  encounterId String
+  encounter   Encounter @relation(fields: [encounterId], references: [id])
+
+  /// Denormalised for printing — see Patient.fullName.
+  patientName String
+
+  status InvoiceStatus @default(DRAFT)
+
+  /// All kobo. Held as stored figures rather than computed on read, so a
+  /// reprinted bill is byte-identical to the one the patient was given.
+  ///   subtotal  = every line, deposits included
+  ///   total     = (services - discount + tax) + deposits
+  subtotal Int @default(0)
+  discount Int @default(0)
+  tax      Int @default(0)
+  total    Int @default(0)
+  /// How much of `total` is deposit rather than earned revenue (§21).
+  depositComponent Int @default(0)
+
+  amountPaid Int @default(0)
+
+  discountReason String?
+  discountApprovedById String?
+
+  issuedAt  DateTime?
+  dueAt     DateTime?
+  paidAt    DateTime?
+  cancelledAt   DateTime?
+  cancelReason  String?
+
+  /// The payment link and QR code a patient is given (§28).
+  paymentToken String? @unique
+
+  notes String?
+
+  lines         InvoiceLine[]
+  payments      Payment[]
+  distributions Distribution[]
+  refunds       Refund[]
+  adjustments   Adjustment[]
+  receipts      Receipt[]
+  depositApplications DepositApplication[]
+
+  createdById String?
+  issuedById  String?
+  /// Optimistic locking. A bill edited from two screens at once must not
+  /// silently keep the later write.
+  version   Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([patientId])
+  @@index([issuedAt])
+  @@map("invoices")
+}
+
+model InvoiceLine {
+  id        String  @id @default(uuid())
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  /// One charge becomes at most one line.
+  chargeId String? @unique
+  charge   Charge? @relation(fields: [chargeId], references: [id], onDelete: SetNull)
+
+  serviceId String?
+  service   Service? @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+
+  kind        ChargeKind
+  description String
+
+  quantity  Int
+  /// Kobo AS CHARGED. Rule 4 in the header: this is the figure, and a later
+  /// tariff change cannot move it.
+  unitPrice Int
+  lineTotal Int
+
+  /// Explains the figure; does not produce it.
+  tariffId String?
+  tariff   Tariff? @relation(fields: [tariffId], references: [id], onDelete: SetNull)
+
+  /// True for a deposit line. The allocation engine is never handed these as
+  /// revenue (§21).
+  isDeposit Boolean @default(false)
+
+  overrideAccountId String?
+
+  sourceKind String?
+  sourceRef  String?
+
+  distributions Distribution[]
+
+  createdAt DateTime @default(now())
+
+  @@index([invoiceId])
+  @@index([kind])
+  @@map("invoice_lines")
+}
+
+// ============================================================================
+// PAYMENTS (§8, §9, §10, §11, §35)
+// ============================================================================
+
+/// §10, in full. Transitions are enforced by lib/payments/states.ts, not by
+/// whichever route happens to be writing.
+enum PaymentStatus {
+  DRAFT
+  PENDING
+  INITIATED
+  PROCESSING
+  SUCCESSFUL
+  FAILED
+  CANCELLED
+  EXPIRED
+  REFUNDED
+  PARTIALLY_REFUNDED
+  REVERSED
+  RECONCILIATION_REQUIRED
+}
+
+/// HOW we know a payment is real. The whole of §2 lives in this enum.
+///
+/// ATTESTED is not a loophole. Cash and POS at a revenue desk are real money,
+/// and a named cashier with a teller slip is the only possible source of truth
+/// for them. What ATTESTED does not get is the PRETENCE of verification: it is
+/// reported as unreconciled until a bank statement matches it.
+enum TrustBasis {
+  GATEWAY_VERIFIED
+  BANK_CONFIRMED
+  ATTESTED
+}
+
+enum PaymentChannel {
+  CARD
+  BANK_TRANSFER
+  USSD
+  POS
+  PAYMENT_LINK
+  CASH
+  CHEQUE
+  NHIS
+  HMO
+  WAIVER
+}
+
+/// A configured payment provider (§9). No provider is hard-coded: an
+/// unconfigured one is simply unavailable.
+model PaymentProvider {
+  id String @id @default(uuid())
+
+  /// "PAYSTACK", "FLUTTERWAVE", "INTERSWITCH", "MONIEPOINT", "DESK".
+  code String @unique
+  name String
+
+  isActive Boolean @default(true)
+  /// Whether this provider can split at source (§16). Where it cannot, the
+  /// platform creates settlement instructions instead.
+  supportsNativeSplit Boolean @default(false)
+
+  /// Credentials live in environment variables, NEVER in the database. This
+  /// records only WHICH env keys this provider reads, so an operator can see
+  /// what must be configured without the secret being stored (§42).
+  secretEnvKey  String?
+  webhookEnvKey String?
+
+  supportedChannels PaymentChannel[]
+
+  transactions PaymentTransaction[]
+  payments     Payment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("payment_providers")
+}
+
+model Payment {
+  id String @id @default(uuid())
+
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id])
+
+  /// Human reference on the receipt, e.g. PAY-2026-000124.
+  paymentNumber String @unique
+
+  /// Kobo.
+  amount   Int
+  currency String @default("NGN")
+
+  status  PaymentStatus  @default(PENDING)
+  channel PaymentChannel
+  /// Null until the payment reaches a status that requires proof.
+  trustBasis TrustBasis?
+
+  providerId String?
+  provider   PaymentProvider? @relation(fields: [providerId], references: [id], onDelete: SetNull)
+
+  /// The provider's own transaction id, verified server to server (§11).
+  providerTransactionId String?
+  /// Bank statement line or teller reference.
+  bankReference String?
+
+  /// For an ATTESTED desk payment: who took it, and the evidence. Both are
+  /// REQUIRED for that trust basis — an unattributed attestation is not evidence.
+  attestedByUserId String?
+  attestedByName   String?
+  evidenceRef      String?
+
+  /// Set the moment money is confirmed. Distinct from createdAt, which is when
+  /// the attempt began.
+  confirmedAt DateTime?
+  failedAt    DateTime?
+  failureReason String?
+
+  /// Reversal, never deletion (§18). A payment that disappears leaves a hole in
+  /// the day's takings that nobody can explain.
+  reversedAt     DateTime?
+  reversalReason String?
+  reversedById   String?
+
+  notes String?
+
+  transactions  PaymentTransaction[]
+  distributions Distribution[]
+  refunds       Refund[]
+  receipts      Receipt[]
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([invoiceId])
+  @@index([status])
+  @@index([providerTransactionId])
+  @@index([confirmedAt])
+  @@map("payments")
+}
+
+/// Every exchange with a provider, kept whole. This is the evidence trail behind
+/// a verification: what was sent, what came back, and when. It is append-only —
+/// a verification that can be edited proves nothing.
+model PaymentTransaction {
+  id String @id @default(uuid())
+
+  paymentId String
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  providerId String?
+  provider   PaymentProvider? @relation(fields: [providerId], references: [id], onDelete: SetNull)
+
+  /// "INITIALISE", "VERIFY", "WEBHOOK", "REFUND", "SPLIT_CONFIG".
+  operation String
+  /// Status the provider reported.
+  providerStatus String?
+  providerReference String?
+
+  /// Amount the PROVIDER said, in kobo. Compared against the invoice rather
+  /// than trusted: §11 verifies the amount, not just the reference.
+  providerAmount Int?
+
+  /// Raw payloads, redacted of secrets before storage. Kept because a dispute
+  /// six months later is settled by what the provider actually said.
+  requestPayload  Json?
+  responsePayload Json?
+
+  httpStatus Int?
+  /// Whether the webhook signature verified (§35). A false here is a security
+  /// event, not a retry.
+  signatureValid Boolean?
+
+  occurredAt DateTime @default(now())
+
+  @@index([paymentId, occurredAt])
+  @@index([providerReference])
+  @@map("payment_transactions")
+}
+
+/// Consumed idempotency keys (§34, §35).
+///
+/// The guarantee: if the same webhook arrives five times, exactly one financial
+/// allocation results. The stored response is replayed for the other four, so a
+/// retrying provider sees success rather than an error that makes it retry again.
+model IdempotencyKey {
+  id  String @id @default(uuid())
+  key String @unique
+
+  /// Route that consumed it, so two endpoints cannot collide on one key.
+  scope String
+
+  httpStatus   Int
+  responseBody Json
+
+  /// What it produced, for tracing.
+  paymentId String?
+
+  createdAt DateTime @default(now())
+  /// Keys are pruned after a retention window, not kept for ever.
+  expiresAt DateTime
+
+  @@index([scope, createdAt])
+  @@index([expiresAt])
+  @@map("idempotency_keys")
+}
+
+// ============================================================================
+// REVENUE ACCOUNTS, BENEFICIARIES AND ALLOCATION RULES (§13, §14, §15, §41)
+// ============================================================================
+
+enum BeneficiaryType {
+  HOSPITAL
+  /// Capital and infrastructure fund. Institutional policy levies a share of
+  /// consumables revenue into it — see the CONSUMABLE rules in prisma/seed.ts.
+  /// Kept distinct from HOSPITAL so "what has the development fund accrued this
+  /// quarter" is a query rather than an archaeology exercise.
+  HOSPITAL_DEVELOPMENT
+  DEPARTMENT
+  THEATRE
+  PHARMACY
+  LABORATORY
+  RADIOLOGY
+  CSSD
+  BLOOD_BANK
+  PROFESSIONAL_POOL
+  CONSUMABLE_PROVIDER
+  EXTERNAL_VENDOR
+  COST_CENTRE
+}
+
+/// Where money is owed (§14).
+///
+/// NOTE ON §15. There is deliberately no per-individual account type. §15 is
+/// explicit that professional fees must NOT be routed to a person because their
+/// name appears on a case; PROFESSIONAL_POOL is an institutional account
+/// governed by an approved beneficiary configuration, and distribution to
+/// individuals from it is a payroll decision made outside this system.
+model RevenueAccount {
+  id   String @id @default(uuid())
+  code String @unique
+  name String
+
+  beneficiaryType BeneficiaryType
+
+  departmentName String?
+  costCentre     String?
+
+  bankName String?
+  /// ENCRYPTED AT REST (§14, §42). Never returned whole to a user who does not
+  /// need it — the API masks all but the last four digits.
+  accountNumberEncrypted String?
+  accountNumberLast4     String?
+  accountName            String?
+
+  currency String @default("NGN")
+
+  /// Provider-side subaccount code, where native split settlement is used (§16).
+  providerSubaccountCode String?
+
+  isActive Boolean @default(true)
+
+  /// A bank destination is a high-risk field: changing one redirects money.
+  /// Approval and its audit are mandatory (§25, §34).
+  approvedById String?
+  approvedAt   DateTime?
+
+  effectiveFrom DateTime  @db.Date
+  effectiveTo   DateTime? @db.Date
+
+  rules            AllocationRule[]
+  distributions    Distribution[]
+  settlementItems  SettlementItem[]
+  settlements      Settlement[]
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([beneficiaryType, isActive])
+  @@map("revenue_accounts")
+}
+
+/// §13's four allocation types.
+enum AllocationRuleType {
+  FIXED
+  TIERED
+  PERCENTAGE
+  RESIDUAL
+}
+
+/// What share of a charge goes where (§13), effective-dated (§41).
+///
+/// A rule is NEVER edited in place. Changing a split from 80/20 to 70/30 writes
+/// `effectiveTo` on the old rows and inserts new ones, so a payment allocated
+/// last year still explains itself under the rules that applied then.
+model AllocationRule {
+  id String @id @default(uuid())
+
+  kind ChargeKind
+
+  accountId String
+  account   RevenueAccount @relation(fields: [accountId], references: [id])
+
+  type AllocationRuleType
+
+  /// FIXED: kobo off the top. TIERED: the size of this account's tier, in kobo.
+  amount Int?
+  /// PERCENTAGE: basis points. 1% = 100, 100% = 10,000. Integer, so shares of an
+  /// integer total can be made to sum back to it exactly.
+  shareBasisPoints Int?
+
+  /// Stage ordering, and tie-breaking, so the same invoice always splits the
+  /// same way. A split that varies run to run cannot be audited.
+  priority Int @default(0)
+
+  label String?
+  notes String?
+
+  effectiveFrom DateTime  @db.Date
+  effectiveTo   DateTime? @db.Date
+
+  /// Changing where money goes is one of §25's controlled acts.
+  createdById  String?
+  approvedById String?
+  approvedAt   DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([kind, effectiveFrom])
+  @@index([accountId])
+  @@map("allocation_rules")
+}
+
+// ============================================================================
+// DISTRIBUTION AND SETTLEMENT (§12, §16, §17, §51)
+// ============================================================================
+
+enum DistributionStatus {
+  /// Calculated and owed, nothing sent.
+  PENDING
+  /// Included in a settlement instruction that has gone to a bank or provider.
+  SETTLEMENT_INITIATED
+  /// The receiving bank or provider confirmed it.
+  SETTLED
+  /// Reversed by a refund or payment reversal, with a recovery record.
+  REVERSED
+  CANCELLED
+}
+
+/// The computed split for one payment, written when it is allocated.
+///
+/// Recorded PER INVOICE LINE, not per charge kind. That is what makes §30's
+/// requirement literally true: every allocated naira names the charge that
+/// produced it. Rolling up first would leave a consumables total that no longer
+/// knows which vendor supplied which item.
+model Distribution {
+  id String @id @default(uuid())
+
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  /// The payment whose allocation this is. Null only for a pre-payment accrual.
+  paymentId String?
+  payment   Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
+  invoiceLineId String?
+  invoiceLine   InvoiceLine? @relation(fields: [invoiceLineId], references: [id], onDelete: SetNull)
+
+  accountId String
+  account   RevenueAccount @relation(fields: [accountId], references: [id])
+
+  kind ChargeKind
+
+  /// Kobo. The distributions for one payment sum EXACTLY to the amount
+  /// allocated — lib/allocation.ts asserts this before anything is written.
+  amount Int
+
+  /// The rule that produced this figure, kept so it can be re-derived years
+  /// later even after the rule itself has been superseded.
+  ruleType         AllocationRuleType
+  shareBasisPoints Int?
+  ruleId           String?
+
+  status DistributionStatus @default(PENDING)
+
+  settlementItemId String?
+
+  /// Set when a refund or reversal unwound this distribution (§19).
+  reversedAt        DateTime?
+  reversalReason    String?
+  /// The compensating distribution that reversed it. Never a destructive edit.
+  reversedByDistributionId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([invoiceId])
+  @@index([accountId, status])
+  @@index([paymentId])
+  @@map("distributions")
+}
+
+/// §16 and §51. These statuses exist BECAUSE they are different things, and the
+/// application must never let INITIATED read as money that has arrived.
+enum SettlementStatus {
+  DRAFT
+  INITIATED
+  PROCESSING
+  CONFIRMED
+  FAILED
+  PARTIALLY_CONFIRMED
+  CANCELLED
+}
+
+/// One instruction to move money to one beneficiary, covering many invoices.
+///
+/// Grouped by account because that is how a transfer is actually made: one
+/// payment to a vendor covering forty invoices, not forty transfers.
+model Settlement {
+  id String @id @default(uuid())
+
+  settlementNumber String @unique
+
+  accountId String
+  account   RevenueAccount @relation(fields: [accountId], references: [id])
+
+  /// Kobo. The sum of its items, asserted at creation.
+  amount   Int
+  currency String @default("NGN")
+
+  status SettlementStatus @default(DRAFT)
+
+  /// How the money is intended to move. NATIVE_SPLIT means the provider did it
+  /// at source; MANUAL_TRANSFER means Finance executes it in the bank.
+  method String @default("MANUAL_TRANSFER")
+
+  initiatedAt   DateTime?
+  initiatedById String?
+
+  /// REQUIRED to confirm (§16). "Settled by somebody, at some point, no
+  /// reference" is worse than leaving it pending: it looks reconciled and cannot
+  /// be checked.
+  confirmedAt    DateTime?
+  confirmedById  String?
+  bankReference  String?
+
+  failedAt      DateTime?
+  failureReason String?
+
+  /// §44's settlement lock: once initiated, the same distributions cannot be
+  /// swept into a second instruction.
+  lockedAt DateTime?
+
+  items SettlementItem[]
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([accountId, status])
+  @@index([status])
+  @@map("settlements")
+}
+
+model SettlementItem {
+  id String @id @default(uuid())
+
+  settlementId String
+  settlement   Settlement @relation(fields: [settlementId], references: [id], onDelete: Cascade)
+
+  accountId String
+  account   RevenueAccount @relation(fields: [accountId], references: [id])
+
+  /// Kobo.
+  amount Int
+
+  /// Which distributions this item discharges. Held as ids rather than a
+  /// relation so a distribution can be recovered independently (§19).
+  distributionIds String[]
+
+  createdAt DateTime @default(now())
+
+  @@index([settlementId])
+  @@map("settlement_items")
+}
+
+// ============================================================================
+// DEPOSITS (§21)
+// ============================================================================
+
+/// An admission deposit is money the hospital HOLDS, not money it has EARNED.
+///
+/// Booking it as revenue on receipt overstates income — the defect §21 exists to
+/// prevent. It sits as a liability and is drawn down as services are actually
+/// consumed, and the remaining balance is always the patient's.
+model Deposit {
+  id String @id @default(uuid())
+
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id])
+
+  encounterId String?
+
+  depositNumber String @unique
+
+  /// Kobo received.
+  amount Int
+  /// Kobo already drawn down against real charges.
+  amountApplied Int @default(0)
+  /// Kobo refunded to the patient.
+  amountRefunded Int @default(0)
+
+  currency String @default("NGN")
+
+  /// Which payment brought the money in.
+  paymentId String?
+
+  receivedAt DateTime @default(now())
+  closedAt   DateTime?
+
+  notes String?
+
+  applications DepositApplication[]
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([patientId])
+  @@index([encounterId])
+  @@map("deposits")
+}
+
+/// One draw-down of a deposit against a real charge. Liability becomes revenue
+/// here, and only here.
+model DepositApplication {
+  id String @id @default(uuid())
+
+  depositId String
+  deposit   Deposit @relation(fields: [depositId], references: [id], onDelete: Cascade)
+
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id])
+
+  /// Kobo.
+  amount Int
+  kind   ChargeKind?
+
+  appliedById String?
+  appliedAt   DateTime @default(now())
+
+  @@index([depositId])
+  @@index([invoiceId])
+  @@map("deposit_applications")
+}
+
+// ============================================================================
+// REFUNDS AND ADJUSTMENTS (§19, §23)
+// ============================================================================
+
+enum RefundStatus {
+  REQUESTED
+  UNDER_REVIEW
+  APPROVED
+  PROCESSING
+  REFUNDED
+  FAILED
+  REJECTED
+}
+
+/// A refund does NOT delete or edit the original payment (§19). It is its own
+/// transaction, which reverses the applicable allocations and, where money has
+/// already been settled out, records a recovery.
+model Refund {
+  id String @id @default(uuid())
+
+  refundNumber String @unique
+
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id])
+
+  paymentId String
+  payment   Payment @relation(fields: [paymentId], references: [id])
+
+  /// Kobo. May be less than the payment — a partial refund is normal.
+  amount   Int
+  currency String @default("NGN")
+
+  reason String
+
+  status RefundStatus @default(REQUESTED)
+
+  requestedById String?
+  requestedAt   DateTime @default(now())
+
+  /// §25: never the same person as requestedById. Enforced in lib/rbac.ts.
+  reviewedById String?
+  approvedById String?
+  approvedAt   DateTime?
+  rejectedById String?
+  rejectionReason String?
+
+  /// Proof the money actually went back (§51).
+  paidAt        DateTime?
+  bankReference String?
+  providerRefundId String?
+
+  failedAt      DateTime?
+  failureReason String?
+
+  /// True where settled distributions had to be recovered from beneficiaries
+  /// that had already been paid. Named, because it needs following up.
+  requiresRecovery Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([invoiceId])
+  @@index([status])
+  @@map("refunds")
+}
+
+enum AdjustmentKind {
+  CREDIT_NOTE
+  ADDITIONAL_CHARGE
+  WRITE_OFF
+  WAIVER
+  CORRECTION
+}
+
+/// §23: once a payment is successful, the invoice is not edited. An adjustment
+/// is a NEW financial record that references the original and preserves it.
+model Adjustment {
+  id String @id @default(uuid())
+
+  adjustmentNumber String @unique
+
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id])
+
+  kind AdjustmentKind
+
+  /// Kobo. Positive; direction is carried by `kind`, never by a sign.
+  amount Int
+
+  reason String
+
+  requestedById String?
+  approvedById  String?
+  approvedAt    DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([invoiceId])
+  @@map("adjustments")
+}
+
+// ============================================================================
+// LEDGER (§18)
+// ============================================================================
+
+enum LedgerAccountType {
+  ACCOUNTS_RECEIVABLE
+  CASH_AT_BANK
+  PATIENT_DEPOSIT_LIABILITY
+  REVENUE
+  SETTLEMENT_PAYABLE
+  REFUND_PAYABLE
+  TAX_PAYABLE
+  DISCOUNT_GIVEN
+  SUSPENSE
+}
+
+enum LedgerEventType {
+  INVOICE_ISSUED
+  PAYMENT_RECEIVED
+  DEPOSIT_RECEIVED
+  DEPOSIT_APPLIED
+  REVENUE_ALLOCATED
+  SETTLEMENT_INITIATED
+  SETTLEMENT_CONFIRMED
+  SETTLEMENT_FAILED
+  REFUND_APPROVED
+  REFUND_PAID
+  PAYMENT_REVERSED
+  ADJUSTMENT
+  DISCOUNT_APPLIED
+  RECONCILIATION_DIFFERENCE
+}
+
+/// One balanced financial event. APPEND-ONLY: there is deliberately no
+/// updatedAt and no route that updates one.
+///
+/// A correction is a compensating entry that references this one through
+/// `reversesEntryId`, leaving the original exactly as it was. That is the whole
+/// point — a reversal that edited the original would destroy the record of what
+/// was believed at the time, which is precisely what an audit needs.
+model LedgerEntry {
+  id String @id @default(uuid())
+
+  eventType LedgerEventType
+
+  /// Kobo. Total of ONE side; both sides equal it. lib/ledger.ts refuses to
+  /// create an entry where they do not.
+  amount Int
+
+  invoiceId    String?
+  paymentId    String?
+  settlementId String?
+  refundId     String?
+  depositId    String?
+
+  /// The entry this one corrects.
+  reversesEntryId String?
+
+  memo String?
+
+  occurredAt      DateTime @default(now())
+  createdByUserId String?
+  createdAt       DateTime @default(now())
+
+  postings LedgerPosting[]
+
+  @@index([eventType, occurredAt])
+  @@index([invoiceId])
+  @@index([paymentId])
+  @@index([occurredAt])
+  @@map("ledger_entries")
+}
+
+model LedgerPosting {
+  id String @id @default(uuid())
+
+  entryId String
+  entry   LedgerEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+
+  account LedgerAccountType
+  /// "DEBIT" or "CREDIT". Direction is NEVER carried by the sign of `amount`.
+  side    String
+  /// Kobo. Always positive.
+  amount  Int
+
+  /// Set where the posting concerns a specific beneficiary, so a settlement
+  /// report can be produced per account.
+  revenueAccountId String?
+  /// Set so a revenue report can be produced by service (§46).
+  chargeKind       ChargeKind?
+
+  memo String?
+
+  createdAt DateTime @default(now())
+
+  @@index([entryId])
+  @@index([account])
+  @@index([revenueAccountId])
+  @@map("ledger_postings")
+}
+
+// ============================================================================
+// RECONCILIATION (§31, §32)
+// ============================================================================
+
+enum ReconciliationStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum ExceptionType {
+  PAYMENT_WITHOUT_INVOICE
+  INVOICE_PAID_WITHOUT_GATEWAY_RECORD
+  AMOUNT_MISMATCH
+  CURRENCY_MISMATCH
+  DUPLICATE_TRANSACTION
+  SETTLEMENT_AMOUNT_MISMATCH
+  FAILED_SETTLEMENT
+  REVERSED_PAYMENT
+  UNRECONCILED_ATTESTED_PAYMENT
+  ALLOCATION_DOES_NOT_SUM
+  LEDGER_OUT_OF_BALANCE
+  UNMATCHED_BANK_CREDIT
+}
+
+enum ExceptionStatus {
+  OPEN
+  INVESTIGATING
+  RESOLVED
+  WRITTEN_OFF
+}
+
+/// One reconciliation run (§32). Scheduled, comparing invoices against the
+/// gateway, the bank and the ledger.
+model ReconciliationRun {
+  id String @id @default(uuid())
+
+  /// The business day reconciled.
+  periodStart DateTime
+  periodEnd   DateTime
+
+  status ReconciliationStatus @default(RUNNING)
+
+  /// Totals compared, all kobo.
+  totalInvoiced  Int @default(0)
+  totalCollected Int @default(0)
+  totalAllocated Int @default(0)
+  totalSettled   Int @default(0)
+  /// From the imported bank statement, where one was provided.
+  totalBankCredits Int?
+
+  exceptionsFound Int @default(0)
+
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  runById    String?
+  /// Null when the run was scheduled rather than triggered by a person.
+  isScheduled Boolean @default(true)
+
+  exceptions ReconciliationException[]
+
+  @@index([periodStart])
+  @@index([status])
+  @@map("reconciliation_runs")
+}
+
+/// A discrepancy. It stays OPEN until somebody explains it — an unexplained
+/// difference absorbed into revenue is a question nobody will ever ask again.
+model ReconciliationException {
+  id String @id @default(uuid())
+
+  runId String
+  run   ReconciliationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  type   ExceptionType
+  status ExceptionStatus @default(OPEN)
+
+  /// Kobo, where the exception is about an amount.
+  expectedAmount Int?
+  actualAmount   Int?
+  difference     Int?
+
+  invoiceId    String?
+  paymentId    String?
+  settlementId String?
+  providerReference String?
+
+  detail String
+
+  resolvedById String?
+  resolvedAt   DateTime?
+  resolution   String?
+
+  createdAt DateTime @default(now())
+
+  @@index([runId, status])
+  @@index([type, status])
+  @@map("reconciliation_exceptions")
+}
+
+// ============================================================================
+// RECEIPTS (§26, §28)
+// ============================================================================
+
+/// Issued only after a payment is confirmed. The verification code is what makes
+/// a receipt checkable at a desk (§26) rather than merely printable.
+model Receipt {
+  id String @id @default(uuid())
+
+  receiptNumber String @unique
+
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id])
+
+  paymentId String
+  payment   Payment @relation(fields: [paymentId], references: [id])
+
+  /// Kobo, as receipted.
+  amountPaid Int
+  balanceAfter Int
+
+  /// Short, human-readable, unguessable. Printed under the QR code so a receipt
+  /// can be verified by a clerk with no scanner.
+  verificationCode String @unique
+
+  /// Frozen at issue: a reprint must be identical to what the patient was given.
+  snapshot Json
+
+  issuedById String?
+  issuedAt   DateTime @default(now())
+
+  /// Reprints are counted, because a receipt printed eleven times is worth a look.
+  printCount Int @default(0)
+  lastPrintedAt DateTime?
+
+  @@index([invoiceId])
+  @@index([paymentId])
+  @@map("receipts")
+}
+
+// ============================================================================
+// APPROVALS (§22, §25, §48)
+// ============================================================================
+
+enum ApprovalSubject {
+  PRICE_OVERRIDE
+  DISCOUNT
+  WAIVER
+  REFUND
+  ADJUSTMENT
+  ALLOCATION_RULE_CHANGE
+  REVENUE_ACCOUNT_CHANGE
+  INVOICE_CANCELLATION
+  SETTLEMENT
+}
+
+enum ApprovalDecision {
+  PENDING
+  APPROVED
+  REJECTED
+  WITHDRAWN
+}
+
+model Approval {
+  id String @id @default(uuid())
+
+  subject   ApprovalSubject
+  /// The record awaiting approval.
+  subjectId String
+
+  decision ApprovalDecision @default(PENDING)
+
+  requestedById String
+  requestedAt   DateTime @default(now())
+  requestReason String
+
+  /// §25: MUST differ from requestedById. Enforced in lib/rbac.ts, not merely
+  /// hoped for.
+  decidedById String?
+  decidedAt   DateTime?
+  decisionNote String?
+
+  /// Kobo, where the approval concerns an amount. Both figures are kept (§22).
+  previousAmount Int?
+  newAmount      Int?
+
+  @@index([subject, decision])
+  @@index([subjectId])
+  @@map("approvals")
+}
+
+// ============================================================================
+// AUDIT (§33)
+// ============================================================================
+
+/// Every financial action, immutably.
+///
+/// This is NOT merely a report. It is an INPUT to the separation-of-duties
+/// control: checkSeparationOfDuties() reads a record's prior acts from here to
+/// decide whether the current user may act. A system that logs nothing cannot
+/// enforce §25 at all, which is why the audit write and the control were built
+/// together.
+///
+/// APPEND-ONLY. No updatedAt, and the database role the application uses should
+/// hold INSERT and SELECT on this table and nothing else.
+model AuditLog {
+  id String @id @default(uuid())
+
+  /// The §25 duty this act constitutes, where it is one — 'PAYMENT_CONFIRMED',
+  /// 'PRICE_OVERRIDDEN', 'REFUND_APPROVED'. This is the field the SoD check reads.
+  duty String?
+
+  action String
+  entity String
+  entityId String?
+
+  userId   String?
+  userName String?
+  userRole String?
+
+  patientId String?
+  invoiceId String?
+  paymentId String?
+
+  /// Both sides of a change, so "what did it used to say" is always answerable.
+  previousValue Json?
+  newValue      Json?
+
+  reason String?
+  /// Set when an approval authorised this act.
+  approvalId String?
+
+  /// Recorded where available. Not used for authorisation — an IP is evidence,
+  /// never a credential.
+  ipAddress String?
+  userAgent String?
+  sessionId String?
+
+  /// True when a separation-of-duties bar was overridden under policy. These
+  /// are what an internal auditor should read first.
+  sodOverridden Boolean @default(false)
+
+  occurredAt DateTime @default(now())
+
+  @@index([entity, entityId])
+  @@index([userId, occurredAt])
+  @@index([duty])
+  @@index([invoiceId])
+  @@index([occurredAt])
+  @@map("audit_logs")
+}
+
+// ============================================================================
+// CONFIGURATION AND NOTIFICATION (§45, §48, §50)
+// ============================================================================
+
+/// Institutional policy, held as data rather than compiled in (§50).
+///
+/// §50 is explicit that legal and regulatory rules must not be hard-coded. Tax
+/// rates, approval thresholds, allocation timing and retention periods all live
+/// here, each with a note recording WHY it is set as it is and on whose
+/// authority — so a figure can be defended, not merely found.
+model OrganisationSetting {
+  id String @id @default(uuid())
+
+  key   String @unique
+  value String
+
+  /// "MONEY_KOBO", "BASIS_POINTS", "BOOLEAN", "STRING", "ENUM".
+  valueType String @default("STRING")
+
+  description String?
+  /// The policy, circular or regulation this setting implements.
+  sourceReference String?
+
+  updatedById String?
+  updatedAt   DateTime @updatedAt
+  createdAt   DateTime @default(now())
+
+  @@map("organisation_settings")
+}
+
+/// Document number sequences (§7, §26).
+///
+/// One row per series per year, incremented atomically inside the transaction
+/// that creates the record being numbered. Counting existing rows to find "the
+/// next number" is how two cashiers at two windows both produce invoice 000124.
+model DocumentSequence {
+  /// "INV-2026", "PAY-2026".
+  key   String @id
+  value Int    @default(0)
+
+  updatedAt DateTime @updatedAt
+
+  @@map("document_sequences")
+}
+
+enum NotificationEvent {
+  INVOICE_GENERATED
+  PAYMENT_INITIATED
+  PAYMENT_SUCCESSFUL
+  PAYMENT_FAILED
+  PAYMENT_REVERSED
+  PAYMENT_PARTIAL
+  ALLOCATION_COMPLETED
+  SETTLEMENT_INITIATED
+  SETTLEMENT_COMPLETED
+  SETTLEMENT_FAILED
+  REFUND_REQUESTED
+  REFUND_APPROVED
+  RECONCILIATION_DISCREPANCY
+}
+
+model Notification {
+  id String @id @default(uuid())
+
+  event NotificationEvent
+
+  /// Who it is for. Null recipientUserId with a role set means "anyone holding
+  /// this role" — a settlement failure is the finance office's business, not one
+  /// person's inbox.
+  recipientUserId String?
+  recipientRole   RevenueRole?
+
+  title String
+  body  String
+
+  invoiceId    String?
+  paymentId    String?
+  settlementId String?
+
+  readAt DateTime?
+  /// Delivery is separate from creation: a notification that failed to send is
+  /// still a notification that existed.
+  sentAt      DateTime?
+  sendFailure String?
+
+  createdAt DateTime @default(now())
+
+  @@index([recipientUserId, readAt])
+  @@index([recipientRole, createdAt])
+  @@index([event])
+  @@map("notifications")
+}
