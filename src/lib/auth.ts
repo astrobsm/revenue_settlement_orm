@@ -17,6 +17,8 @@ import type { NextAuthOptions } from 'next-auth';
 import CredentialsProvider from 'next-auth/providers/credentials';
 import bcrypt from 'bcryptjs';
 import prisma from './prisma';
+import { verifyBackupCode, verifyTotp } from './mfa';
+import { decryptField } from './crypto';
 
 /** Consecutive failures before an account is locked, and for how long. */
 const MAX_FAILED_LOGINS = 5;
@@ -38,6 +40,8 @@ export const authOptions: NextAuthOptions = {
       credentials: {
         email: { label: 'Email', type: 'text' },
         password: { label: 'Password', type: 'password' },
+        /** Six digits from an authenticator, or a backup code. */
+        totp: { label: 'Authentication code', type: 'text' },
       },
 
       async authorize(credentials) {
@@ -72,6 +76,73 @@ export const authOptions: NextAuthOptions = {
             },
           });
           return null;
+        }
+
+        // --- The second factor (§42) -------------------------------------
+        //
+        // Checked AFTER the password, and only once the password is right, so a
+        // wrong password and a wrong code are indistinguishable to anyone
+        // guessing. Checked BEFORE any session exists, because a session issued
+        // on a password alone is a session that skipped the second factor.
+        if (user.mfaEnabled && user.mfaSecret) {
+          const submitted = credentials?.totp?.trim() ?? '';
+          if (!submitted) return null;
+
+          let accepted = false;
+          let usedCounter: number | null = null;
+          let usedBackupHash: string | undefined;
+
+          if (/^\d{6}$/.test(submitted.replace(/\s/g, ''))) {
+            try {
+              const verdict = verifyTotp({
+                secretBase32: decryptField(user.mfaSecret),
+                code: submitted,
+                lastUsedCounter: user.mfaLastCounter,
+              });
+              accepted = verdict.valid;
+              usedCounter = verdict.counter ?? null;
+            } catch {
+              // An unreadable secret must never fall through to "allowed".
+              accepted = false;
+            }
+          } else {
+            const backup = verifyBackupCode({ code: submitted, hashes: user.mfaBackupCodes });
+            accepted = backup.valid;
+            usedBackupHash = backup.usedHash;
+          }
+
+          if (!accepted) {
+            // A wrong code counts towards the lockout exactly as a wrong password
+            // does. Otherwise the second factor is brute-forceable at thousands
+            // of guesses a minute while the first is not — and six digits is only
+            // a million possibilities.
+            const failedMfa = user.failedLogins + 1;
+            await prisma.user.update({
+              where: { id: user.id },
+              data: {
+                failedLogins: failedMfa,
+                lockedUntil: failedMfa >= MAX_FAILED_LOGINS ? new Date(Date.now() + LOCKOUT_MINUTES * 60_000) : null,
+              },
+            });
+            return null;
+          }
+
+          await prisma.user.update({
+            where: { id: user.id },
+            data: {
+              failedLogins: 0,
+              lockedUntil: null,
+              lastLoginAt: new Date(),
+              // Recording the counter is what makes a code single-use.
+              ...(usedCounter !== null ? { mfaLastCounter: usedCounter } : {}),
+              // A backup code is struck off the moment it is used.
+              ...(usedBackupHash
+                ? { mfaBackupCodes: user.mfaBackupCodes.filter((h) => h !== usedBackupHash) }
+                : {}),
+            },
+          });
+
+          return { id: user.id, name: user.fullName, email: user.email };
         }
 
         await prisma.user.update({

@@ -17,11 +17,11 @@ SERVICE → PRICE → INVOICE → PAYMENT → VERIFICATION → ALLOCATION
 
 ## Status
 
-**The financial core is built and tested. The HTTP and UI layers are not yet
-written.** See [Build state](#build-state) for exactly what exists.
+**The financial core, the API layer and authentication are built and tested. The
+operator UI beyond the readiness page is not yet written.** See [Build state](#build-state) for exactly what exists.
 
 ```
-328 passed, 0 failed        npm test
+362 passed, 0 failed        npm test
 schema valid                npx prisma validate
 strict typecheck clean      npx tsc --noEmit
 ```
@@ -146,6 +146,7 @@ fails the build rather than quietly opening a door:
 | Reconciliation: twelve exception types across five records | [src/lib/reconciliation.ts](src/lib/reconciliation.ts) | 29 |
 | Refunds: lifecycle, and unwinding settled allocations | [src/lib/refunds.ts](src/lib/refunds.ts) | 31 |
 | Deposits: liability, draw-down, discharge | [src/lib/deposits.ts](src/lib/deposits.ts) | 25 |
+| MFA: TOTP proved against the RFC 6238 vectors | [src/lib/mfa.ts](src/lib/mfa.ts) | 34 |
 | Full database schema (36 models) | [prisma/schema.prisma](prisma/schema.prisma) | validates |
 | Migrations, incl. database-level append-only triggers | [prisma/migrations/](prisma/migrations/) | — |
 | Seed: catalogue, accounts, rules, providers, policy | [prisma/seed.ts](prisma/seed.ts) | — |
@@ -156,6 +157,8 @@ fails the build rather than quietly opening a door:
 | `POST /api/payments/initiate`, `POST /api/webhooks/[provider]` | [src/app/api/](src/app/api/) | — |
 | `POST /api/reconciliation` — daily run and exception resolution | [src/app/api/reconciliation/](src/app/api/reconciliation/) | — |
 | `/api/refunds`, `/api/deposits` | [src/app/api/](src/app/api/) | — |
+| `/api/auth/mfa` enrolment, and MFA at sign-in | [src/app/api/auth/](src/app/api/auth/) | — |
+| Readiness page — every check a live query | [src/app/page.tsx](src/app/page.tsx) | — |
 
 The append-only rule is enforced by **database triggers**, not only in
 TypeScript: an application rule is bypassed by `psql`, by a migration script, and

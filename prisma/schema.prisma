@@ -100,12 +100,29 @@ model User {
   status UserStatus @default(PENDING)
 
   /// MFA is REQUIRED for anyone holding a financial-administration role (§42).
-  /// Enforced in the auth layer, recorded here.
-  mfaEnabled     Boolean @default(false)
-  mfaSecret      String?
-  lastLoginAt    DateTime?
-  failedLogins   Int      @default(0)
-  lockedUntil    DateTime?
+  /// The route guard refuses every configuration action until this is true, so
+  /// the flag is a live control rather than a note.
+  mfaEnabled Boolean @default(false)
+
+  /// The TOTP secret, ENCRYPTED AT REST with the same AES-256-GCM key as bank
+  /// details. A secret stored in plaintext is a second factor an attacker with
+  /// database access simply computes for themselves.
+  mfaSecret String?
+
+  /// The last TOTP counter this user authenticated with. Anything at or below it
+  /// is refused, which is what makes a code single-use — without it, a code read
+  /// over somebody's shoulder stays valid for the rest of its 30-second window.
+  mfaLastCounter Int?
+
+  /// SHA-256 hashes of unused backup codes. Never the codes themselves: a backup
+  /// code is a password. Each is struck off the list as it is used.
+  mfaBackupCodes String[]
+
+  mfaEnrolledAt DateTime?
+
+  lastLoginAt  DateTime?
+  failedLogins Int       @default(0)
+  lockedUntil  DateTime?
 
   roles RoleAssignment[]
 

@@ -1,0 +1,26 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  /* A revenue desk runs all day under fluorescent light. High contrast, plain
+     type, nothing decorative. */
+  @apply bg-slate-50 text-slate-900 antialiased;
+}
+
+@media (prefers-color-scheme: dark) {
+  body {
+    @apply bg-slate-950 text-slate-100;
+  }
+}
+
+/* Amounts are read in columns and checked by eye against a printed bill, so
+   figures line up rather than reflowing with the text. */
+.figure {
+  font-variant-numeric: tabular-nums;
+  @apply font-mono;
+}
