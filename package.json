@@ -12,13 +12,14 @@
     "db:push": "prisma db push",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
-    "db:seed": "tsx prisma/seed.ts",
+    "db:seed": "tsx --env-file=.env.local prisma/seed.ts",
     "db:studio": "prisma studio",
     "test": "node scripts/tests/run-all.js",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+    "db:verify-guards": "psql -U postgres -h localhost -d central_theatre_revenue -f scripts/verify-db-guards.sql"
   },
   "prisma": {
-    "seed": "tsx prisma/seed.ts"
+    "seed": "tsx --env-file=.env.local prisma/seed.ts"
   },
   "dependencies": {
     "@prisma/client": "^5.19.0",

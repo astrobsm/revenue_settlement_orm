@@ -9,6 +9,7 @@ dist/
 .env.local
 .env*.local
 *.pem
+.seed-credentials.txt
 
 npm-debug.log*
 yarn-error.log*
