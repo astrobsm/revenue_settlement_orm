@@ -168,80 +168,121 @@ export default async function ReadinessPage() {
   const failing = checks.filter((c) => !c.ok && !c.advisory);
   const advisories = checks.filter((c) => c.advisory);
 
+  const ready = reachable && failing.length === 0;
+
   return (
-    <main className="mx-auto max-w-3xl px-6 py-12">
-      <header className="mb-10">
-        <p className="text-xs uppercase tracking-widest text-slate-500">UNTH Ituku Ozalla</p>
-        <h1 className="mt-1 text-3xl font-semibold">Central Theatre Revenue</h1>
-        <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
-          One consolidated bill, one payment, and an exact allocation to every department, professional pool,
-          pharmacy, store and vendor that earned a share of it.
-        </p>
+    <div className="min-h-screen">
+      {/* The brand band marks this as the hospital's own system before anybody
+          types anything into it. */}
+      <header className="px-6 py-10" style={{ background: 'var(--brand-strong)', color: 'var(--brand-on)' }}>
+        <div className="mx-auto max-w-3xl">
+          <p className="text-[11px] uppercase tracking-[0.2em] opacity-70">
+            University of Nigeria Teaching Hospital · Ituku Ozalla
+          </p>
+          <h1 className="mt-3 text-3xl font-semibold">Central Theatre Revenue</h1>
+          <p className="mt-3 max-w-xl text-sm leading-relaxed opacity-85">
+            One consolidated bill, one payment, and an exact allocation to every department, professional pool,
+            pharmacy, store and vendor that earned a share of it.
+          </p>
+          <a
+            href="/auth/signin"
+            className="mt-6 inline-block rounded px-4 py-2 text-sm font-semibold"
+            style={{ background: 'var(--brand-on)', color: 'var(--brand-strong)' }}
+          >
+            Sign in
+          </a>
+        </div>
       </header>
 
-      {!reachable ? (
-        <section className="rounded border border-red-300 bg-red-50 p-4 dark:border-red-800 dark:bg-red-950">
-          <h2 className="font-semibold text-red-800 dark:text-red-200">The database cannot be reached</h2>
-          <p className="mt-1 text-sm text-red-700 dark:text-red-300">{error}</p>
-          <p className="mt-2 text-sm text-red-700 dark:text-red-300">
-            Nothing can be billed or collected until this is resolved. Check DATABASE_URL and that PostgreSQL is
-            running.
-          </p>
-        </section>
-      ) : (
-        <>
+      <main className="mx-auto max-w-3xl px-6 py-10">
+        {!reachable ? (
           <section
-            className={`mb-8 rounded border p-4 ${
-              failing.length > 0
-                ? 'border-red-300 bg-red-50 dark:border-red-800 dark:bg-red-950'
-                : 'border-emerald-300 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950'
-            }`}
+            className="rounded border p-4"
+            style={{
+              background: 'var(--status-critical-bg)',
+              borderColor: 'var(--status-critical)',
+              color: 'var(--status-critical)',
+            }}
           >
             <h2 className="font-semibold">
-              {failing.length > 0
-                ? `${failing.length} thing${failing.length === 1 ? '' : 's'} must be fixed before this installation can take money safely`
-                : 'This installation is ready to take money'}
+              <span aria-hidden className="mr-1.5 font-mono">
+                ✕
+              </span>
+              The database cannot be reached
             </h2>
-            {advisories.length > 0 && (
-              <p className="mt-1 text-sm opacity-80">
-                {advisories.length} advisor{advisories.length === 1 ? 'y' : 'ies'} below — worth knowing, not blocking.
-              </p>
-            )}
+            <p className="mt-1 text-sm">{error}</p>
+            <p className="mt-2 text-sm">
+              Nothing can be billed or collected until this is resolved. Check DATABASE_URL and that PostgreSQL is
+              running.
+            </p>
           </section>
-
-          <ul className="space-y-3">
-            {checks.map((check) => (
-              <li
-                key={check.label}
-                className="flex gap-3 rounded border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900"
-              >
-                <span
-                  aria-hidden
-                  className={`mt-0.5 select-none font-mono text-sm ${
-                    check.ok ? 'text-emerald-600' : check.advisory ? 'text-amber-600' : 'text-red-600'
-                  }`}
-                >
-                  {check.ok ? '✓' : check.advisory ? '!' : '✗'}
+        ) : (
+          <>
+            <section
+              className="mb-7 rounded border p-4"
+              style={{
+                background: ready ? 'var(--status-good-bg)' : 'var(--status-critical-bg)',
+                borderColor: ready ? 'var(--status-good)' : 'var(--status-critical)',
+              }}
+            >
+              <h2 className="font-semibold" style={{ color: ready ? 'var(--status-good)' : 'var(--status-critical)' }}>
+                <span aria-hidden className="mr-1.5 font-mono">
+                  {ready ? '✓' : '✕'}
                 </span>
-                <div>
-                  <p className="text-sm font-medium">
-                    {check.label}
-                    <span className="sr-only">{check.ok ? ' — ready' : check.advisory ? ' — advisory' : ' — not ready'}</span>
-                  </p>
-                  <p className="text-sm text-slate-600 dark:text-slate-400">{check.detail}</p>
-                </div>
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
+                {ready
+                  ? 'This installation is ready to take money'
+                  : `${failing.length} thing${failing.length === 1 ? '' : 's'} must be fixed before this installation can take money safely`}
+              </h2>
+              {advisories.length > 0 && (
+                <p className="mt-1 text-sm" style={{ color: 'var(--ink-secondary)' }}>
+                  {advisories.length} advisor{advisories.length === 1 ? 'y' : 'ies'} below — worth knowing, not
+                  blocking.
+                </p>
+              )}
+            </section>
 
-      <footer className="mt-10 border-t border-slate-200 pt-6 text-xs text-slate-500 dark:border-slate-800">
-        <p>
-          Every check above is a live query, not a reading of the configuration file — this page reports what is
-          true, not what was intended.
-        </p>
-      </footer>
-    </main>
+            <ul className="space-y-2">
+              {checks.map((check) => (
+                <li key={check.label} className="card flex items-start gap-3 p-3.5">
+                  {/* The glyph is not decoration: it is what carries the state for
+                      a reader who cannot separate the green from the red. */}
+                  <span
+                    aria-hidden
+                    className="mt-0.5 select-none font-mono text-sm"
+                    style={{
+                      color: check.ok
+                        ? 'var(--status-good)'
+                        : check.advisory
+                          ? 'var(--status-warn)'
+                          : 'var(--status-critical)',
+                    }}
+                  >
+                    {check.ok ? '✓' : check.advisory ? '!' : '✕'}
+                  </span>
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium">
+                      {check.label}
+                      <span className="sr-only">
+                        {check.ok ? ' — ready' : check.advisory ? ' — advisory' : ' — not ready'}
+                      </span>
+                    </p>
+                    <p className="text-sm" style={{ color: 'var(--ink-secondary)' }}>
+                      {check.detail}
+                    </p>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+
+        <footer className="mt-9 border-t pt-6 text-xs" style={{ borderColor: 'var(--border)', color: 'var(--ink-muted)' }}>
+          <p>
+            Every check above is a live query, not a reading of the configuration file — this page reports what is
+            true, not what was intended.
+          </p>
+        </footer>
+      </main>
+    </div>
   );
 }

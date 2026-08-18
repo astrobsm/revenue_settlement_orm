@@ -1,51 +1,56 @@
 // ============================================================
 // Overview (§29, §30)
 // ------------------------------------------------------------
-// The §30 chain, on one screen:
+// EXACTLY ONE HERO FIGURE — today's collection. A dashboard with four 48px
+// numbers has no headline, and a reader's eye has nowhere to land.
 //
-//   COLLECTED -> ALLOCATED -> SETTLEMENT PENDING -> SETTLED
+// EVERY FIGURE IS DERIVED FROM THE LEDGER POSTINGS, never read from a stored
+// counter. Four counters kept in step by hand are four counters that will
+// eventually disagree with one another; a figure computed from the postings
+// cannot drift from them.
 //
-// Every figure is DERIVED FROM THE LEDGER POSTINGS rather than read from a status
-// column. Four counters that code must remember to keep in step are four
-// counters that will eventually disagree with each other; a figure computed from
-// the postings cannot drift from them.
-//
-// The unreconciled figure is shown next to the collected one deliberately. A
-// dashboard that shows only what was collected invites the reading that all of
-// it has arrived somewhere, and that is precisely the impression §51 forbids.
+// "ATTESTED, NOT YET BANKED" SITS BESIDE THE COLLECTED FIGURE ON PURPOSE. A
+// screen showing only what was collected invites the reading that all of it has
+// arrived somewhere, and that is precisely the impression §51 forbids.
 // ============================================================
 
 import Link from 'next/link';
 import prisma from '@/lib/prisma';
-import { Money } from '@/components/Money';
+import { formatNaira } from '@/lib/money';
+import { Delta, StatusPill } from '@/components/Delta';
+import { CollectionTrend, RankedBars, SettlementChain } from '@/components/Charts';
 
 export const dynamic = 'force-dynamic';
 
-function startOfToday(): Date {
+function startOfDay(offsetDays = 0): Date {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + offsetDays);
   return d;
 }
 
 export default async function OverviewPage() {
-  const today = startOfToday();
+  const today = startOfDay();
+  const yesterday = startOfDay(-1);
+  const fourteenDaysAgo = startOfDay(-13);
 
   const [
     entries,
-    invoicedToday,
-    collectedToday,
+    todayPayments,
+    yesterdayPayments,
     outstanding,
-    attestedUnreconciled,
-    openExceptions,
-    depositsHeld,
+    attested,
+    exceptions,
+    deposits,
+    recentPayments,
+    byAccount,
+    accounts,
   ] = await Promise.all([
-    // The chain, from the postings.
     prisma.ledgerEntry.groupBy({ by: ['eventType'], _sum: { amount: true } }),
-    prisma.invoice.aggregate({ where: { issuedAt: { gte: today } }, _sum: { total: true }, _count: true }),
+    prisma.payment.aggregate({ where: { confirmedAt: { gte: today }, reversedAt: null }, _sum: { amount: true }, _count: true }),
     prisma.payment.aggregate({
-      where: { confirmedAt: { gte: today }, reversedAt: null },
+      where: { confirmedAt: { gte: yesterday, lt: today }, reversedAt: null },
       _sum: { amount: true },
-      _count: true,
     }),
     prisma.invoice.findMany({
       where: { status: { in: ['ISSUED', 'PARTIALLY_PAID'] } },
@@ -58,107 +63,213 @@ export default async function OverviewPage() {
     }),
     prisma.reconciliationException.count({ where: { status: { in: ['OPEN', 'INVESTIGATING'] } } }),
     prisma.deposit.findMany({ where: { closedAt: null }, select: { amount: true, amountApplied: true, amountRefunded: true } }),
+    prisma.payment.findMany({
+      where: { confirmedAt: { gte: fourteenDaysAgo }, reversedAt: null },
+      select: { amount: true, confirmedAt: true },
+    }),
+    prisma.distribution.groupBy({
+      by: ['accountId'],
+      where: { status: { notIn: ['CANCELLED', 'REVERSED'] } },
+      _sum: { amount: true },
+    }),
+    prisma.revenueAccount.findMany({ select: { id: true, name: true, beneficiaryType: true } }),
   ]);
 
-  const sumOf = (eventType: string) => entries.find((e) => e.eventType === eventType)?._sum.amount ?? 0;
+  const sumOf = (t: string) => entries.find((e) => e.eventType === t)?._sum.amount ?? 0;
 
-  const collected = sumOf('PAYMENT_RECEIVED');
+  const collectedAllTime = sumOf('PAYMENT_RECEIVED');
   const allocated = sumOf('REVENUE_ALLOCATED');
   const settled = sumOf('SETTLEMENT_CONFIRMED');
-  const settlementPending = allocated - settled;
 
+  const collectedToday = todayPayments._sum.amount ?? 0;
+  const collectedYesterday = yesterdayPayments._sum.amount ?? 0;
   const outstandingTotal = outstanding.reduce((s, i) => s + Math.max(0, i.total - i.amountPaid), 0);
-  const heldForPatients = depositsHeld.reduce((s, d) => s + (d.amount - d.amountApplied - d.amountRefunded), 0);
+  const heldForPatients = deposits.reduce((s, d) => s + (d.amount - d.amountApplied - d.amountRefunded), 0);
+  const attestedTotal = attested._sum.amount ?? 0;
+
+  // --- Trend: one point per day, zero-filled ------------------------------
+  // Zero-filled deliberately. Skipping days with no collection would compress
+  // the axis and make a quiet week look like a busy one.
+  const byDay = new Map<string, number>();
+  for (let i = 0; i < 14; i++) {
+    byDay.set(startOfDay(-13 + i).toISOString().slice(0, 10), 0);
+  }
+  for (const p of recentPayments) {
+    if (!p.confirmedAt) continue;
+    const key = p.confirmedAt.toISOString().slice(0, 10);
+    if (byDay.has(key)) byDay.set(key, (byDay.get(key) ?? 0) + p.amount);
+  }
+  const trend = Array.from(byDay.entries()).map(([date, kobo]) => ({
+    label: new Date(date).toLocaleDateString('en-NG', { day: 'numeric', month: 'short' }),
+    kobo,
+  }));
+
+  // --- Where allocated revenue went ---------------------------------------
+  const accountName = new Map(accounts.map((a) => [a.id, a]));
+  const ranked = byAccount
+    .map((row) => ({
+      label: accountName.get(row.accountId)?.name ?? 'Unknown account',
+      kobo: row._sum.amount ?? 0,
+      sub: accountName.get(row.accountId)?.beneficiaryType.toLowerCase().replace(/_/g, ' '),
+    }))
+    .filter((r) => r.kobo > 0)
+    .sort((a, b) => b.kobo - a.kobo)
+    .slice(0, 8);
 
   return (
-    <div className="space-y-8">
-      <header>
-        <h1 className="text-2xl font-semibold">Overview</h1>
-        <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
-          Every figure below is derived from the ledger postings, not from a stored counter.
-        </p>
-      </header>
+    <div className="space-y-7">
+      {/* --- The headline ------------------------------------------------- */}
+      <section className="card p-6">
+        <div className="flex flex-wrap items-end justify-between gap-6">
+          <div>
+            <p className="text-xs uppercase tracking-wider" style={{ color: 'var(--ink-muted)' }}>
+              Collected today
+            </p>
+            <p className="hero-figure mt-1 text-5xl font-semibold" style={{ color: 'var(--brand)' }}>
+              {formatNaira(collectedToday)}
+            </p>
+            <p className="mt-2 flex flex-wrap items-center gap-3 text-sm">
+              <Delta kobo={collectedToday - collectedYesterday} label="vs yesterday" />
+              <span style={{ color: 'var(--ink-muted)' }}>
+                {todayPayments._count} payment{todayPayments._count === 1 ? '' : 's'}
+              </span>
+            </p>
+          </div>
 
-      {/* --- Today --------------------------------------------------------- */}
-      <section>
-        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">Today</h2>
-        <div className="grid gap-3 sm:grid-cols-3">
-          <Tile label="Billed" kobo={invoicedToday._sum.total ?? 0} sub={`${invoicedToday._count} invoice(s) issued`} />
-          <Tile label="Collected" kobo={collectedToday._sum.amount ?? 0} sub={`${collectedToday._count} payment(s)`} />
-          <Tile label="Outstanding" kobo={outstandingTotal} sub={`${outstanding.length} unpaid invoice(s)`} />
+          <div className="text-right">
+            <p className="text-xs uppercase tracking-wider" style={{ color: 'var(--ink-muted)' }}>
+              Outstanding
+            </p>
+            <p className="figure mt-1 text-2xl font-semibold">{formatNaira(outstandingTotal)}</p>
+            <p className="text-xs" style={{ color: 'var(--ink-muted)' }}>
+              across {outstanding.length} unpaid bill{outstanding.length === 1 ? '' : 's'}
+            </p>
+          </div>
         </div>
       </section>
 
-      {/* --- The §30 chain -------------------------------------------------- */}
+      {/* --- KPI row ------------------------------------------------------ */}
       <section>
-        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">
-          Where the money is, all time
-        </h2>
-        <div className="grid gap-3 sm:grid-cols-4">
-          <Tile label="Collected" kobo={collected} sub="received by the hospital" />
-          <Tile label="Allocated" kobo={allocated} sub="assigned to beneficiaries" />
-          <Tile label="Settlement pending" kobo={settlementPending} sub="owed, not yet paid out" />
-          <Tile label="Settled" kobo={settled} sub="confirmed by a bank" />
-        </div>
-        <p className="mt-2 text-xs text-slate-500">
-          Allocated is lower than collected by whatever is held as patient deposits — a deposit is not revenue until
-          the service is consumed.
-        </p>
-      </section>
-
-      {/* --- What needs attention ------------------------------------------ */}
-      <section>
-        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">Needs attention</h2>
-        <div className="grid gap-3 sm:grid-cols-3">
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <Tile
             label="Held for patients"
-            kobo={heldForPatients}
-            sub="unspent deposits — a liability, not revenue"
+            value={heldForPatients}
+            note="unspent deposits — a liability, not revenue"
           />
           <Tile
             label="Attested, not yet banked"
-            kobo={attestedUnreconciled._sum.amount ?? 0}
-            sub={`${attestedUnreconciled._count} desk payment(s) awaiting a bank match`}
-            warn={(attestedUnreconciled._sum.amount ?? 0) > 0}
+            value={attestedTotal}
+            note={`${attested._count} desk payment${attested._count === 1 ? '' : 's'} awaiting a bank match`}
+            tone={attestedTotal > 0 ? 'warn' : undefined}
           />
-          <div
-            className={`rounded border p-4 ${
-              openExceptions > 0
-                ? 'border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950'
-                : 'border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900'
-            }`}
-          >
-            <p className="text-xs uppercase tracking-wide text-slate-500">Reconciliation exceptions</p>
-            <p className="figure mt-1 text-2xl font-semibold">{openExceptions}</p>
-            <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">
-              {openExceptions === 0 ? 'nothing unexplained' : 'awaiting explanation'}
+          <Tile label="Allocated to beneficiaries" value={allocated} note="assigned, awaiting or already settled" />
+          <div className="card p-4">
+            <p className="text-xs uppercase tracking-wider" style={{ color: 'var(--ink-muted)' }}>
+              Reconciliation
             </p>
-            {openExceptions > 0 && (
-              <Link href="/dashboard/reconciliation" className="mt-2 inline-block text-xs underline">
-                Review them
-              </Link>
-            )}
+            <p className="hero-figure mt-1 text-2xl font-semibold">{exceptions}</p>
+            <p className="mt-1 text-xs" style={{ color: 'var(--ink-secondary)' }}>
+              {exceptions === 0 ? 'nothing unexplained' : 'exceptions awaiting explanation'}
+            </p>
+            <div className="mt-2">
+              {exceptions === 0 ? (
+                <StatusPill tone="good">Clean</StatusPill>
+              ) : (
+                <StatusPill tone="warn">Needs review</StatusPill>
+              )}
+            </div>
           </div>
         </div>
+      </section>
+
+      {/* --- Chain and departments --------------------------------------- */}
+      <div className="grid gap-3 lg:grid-cols-2">
+        <section className="card p-5">
+          <h2 className="text-sm font-semibold">Where the money is</h2>
+          <p className="mb-4 mt-0.5 text-xs" style={{ color: 'var(--ink-secondary)' }}>
+            Collected, then allocated, then settled — the stages are ordered, so the shade carries the order.
+          </p>
+          <SettlementChain
+            stages={[
+              {
+                label: 'Collected',
+                kobo: collectedAllTime,
+                meaning: 'Money the hospital has received and holds.',
+              },
+              {
+                label: 'Allocated',
+                kobo: allocated,
+                meaning:
+                  'Assigned to the accounts that earned it. Lower than collected by whatever is held as patient deposits — a deposit is not revenue until the service is consumed.',
+              },
+              {
+                label: 'Settlement pending',
+                kobo: Math.max(0, allocated - settled),
+                meaning: 'Owed to a beneficiary and not yet paid out. Instructing a transfer moves nothing.',
+              },
+              {
+                label: 'Settled',
+                kobo: settled,
+                meaning: 'Confirmed by a bank, with the reference that proves it. Only this has actually left.',
+              },
+            ]}
+          />
+        </section>
+
+        <section className="card p-5">
+          <h2 className="text-sm font-semibold">Allocated by account</h2>
+          <p className="mb-4 mt-0.5 text-xs" style={{ color: 'var(--ink-secondary)' }}>
+            Every naira here names the charge that produced it.
+          </p>
+          <RankedBars
+            items={ranked}
+            emptyNote="Nothing has been allocated yet. Allocation happens the moment a bill is settled."
+          />
+        </section>
+      </div>
+
+      {/* --- Trend -------------------------------------------------------- */}
+      <section className="card p-5">
+        <div className="mb-4 flex flex-wrap items-baseline justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-semibold">Collections, last fourteen days</h2>
+            <p className="mt-0.5 text-xs" style={{ color: 'var(--ink-secondary)' }}>
+              Days with no collection are shown as zero rather than skipped.
+            </p>
+          </div>
+          <Link href="/dashboard/desk" className="text-xs underline" style={{ color: 'var(--brand)' }}>
+            Go to the revenue desk
+          </Link>
+        </div>
+        <CollectionTrend points={trend} />
       </section>
     </div>
   );
 }
 
-function Tile({ label, kobo, sub, warn = false }: { label: string; kobo: number; sub: string; warn?: boolean }) {
+function Tile({
+  label,
+  value,
+  note,
+  tone,
+}: {
+  label: string;
+  value: number;
+  note: string;
+  tone?: 'warn';
+}) {
   return (
     <div
-      className={`rounded border p-4 ${
-        warn
-          ? 'border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950'
-          : 'border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900'
-      }`}
+      className="card p-4"
+      style={tone === 'warn' ? { background: 'var(--status-warn-bg)', borderColor: 'var(--status-warn)' } : undefined}
     >
-      <p className="text-xs uppercase tracking-wide text-slate-500">{label}</p>
-      <p className="mt-1 text-2xl">
-        <Money kobo={kobo} emphasis />
+      <p className="text-xs uppercase tracking-wider" style={{ color: 'var(--ink-muted)' }}>
+        {label}
       </p>
-      <p className="mt-1 text-xs text-slate-600 dark:text-slate-400">{sub}</p>
+      <p className="hero-figure mt-1 text-2xl font-semibold">{formatNaira(value)}</p>
+      <p className="mt-1 text-xs" style={{ color: 'var(--ink-secondary)' }}>
+        {note}
+      </p>
     </div>
   );
 }

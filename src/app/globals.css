@@ -2,25 +2,200 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ============================================================
+   Palette — green, white and red, VALIDATED rather than chosen
+   ------------------------------------------------------------
+   Green and red are the two things a bank UI wants to say: money in, money out.
+   They are also the single worst pair in colour-vision terms, and this was
+   measured rather than assumed:
+
+     naive green #008300 vs red #e34948   ΔE 7.2 protan   (floor band)
+     dark  green #2fb673 vs red #e66767   ΔE 2.3 deutan   (effectively identical)
+
+   Roughly one man in twelve has red-green deficiency, so a figure whose only
+   cue is its hue is a figure those readers cannot read. Two consequences run
+   through the whole design:
+
+   1. THE STEPS BELOW WERE RE-STEPPED UNTIL THEY PASSED. The separation is
+      carried by LIGHTNESS, not hue, which is what survives simulation:
+        light  #22996a / #a81f1f   ΔE 13.2 deutan, 30.5 normal   ALL PASS
+        dark   #38ad7c / #c9433c   ΔE 10.3 deutan, 29.3 normal   ALL PASS
+
+   2. GREEN AND RED NEVER CARRY MEANING ALONE. Every use is paired with an arrow
+      and a word — see the Delta component, where the icon is not optional
+      because the component will not render without one.
+
+   For magnitude (departments, the settlement chain) a SINGLE-HUE GREEN RAMP is
+   used instead. One hue has no CVD problem at all, and it keeps the brand.
+   Validated with --ordinal: monotone lightness, gaps >= 0.06, light end 2.29:1.
+   ============================================================ */
+
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
+
+  /* Surfaces — white card on a faintly green-grey plane, as a bank ledger sits
+     on a desk rather than floating in a void. */
+  --plane: #f4f6f4;
+  --surface: #ffffff;
+  --surface-sunken: #eef1ee;
+  --border: #dfe4e0;
+  --border-strong: #c5cdc7;
+
+  /* Ink */
+  --ink: #0d1410;
+  --ink-secondary: #4c574f;
+  --ink-muted: #7c8880;
+
+  /* Brand — the green a Nigerian teaching hospital reads as its own. */
+  --brand: #0a7247;
+  --brand-strong: #04492e;
+  --brand-on: #ffffff;
+
+  /* Semantic. Validated pair; never used without an icon and a word. */
+  --money-in: #22996a;
+  --money-out: #a81f1f;
+
+  /* Status. Reserved — never reused as a series colour. */
+  --status-good: #0a7247;
+  --status-warn: #8a5a00;
+  --status-critical: #a81f1f;
+  --status-good-bg: #e6f4ec;
+  --status-warn-bg: #fdf3e0;
+  --status-critical-bg: #fbeaea;
+
+  /* Green ordinal ramp, light->dark. For ordered magnitude only. */
+  --ramp-1: #5cbd93;
+  --ramp-2: #22996a;
+  --ramp-3: #0a7247;
+  --ramp-4: #04492e;
+
+  /* Chart chrome */
+  --grid: #e7ebe8;
+  --axis: #c5cdc7;
 }
 
-body {
-  /* A revenue desk runs all day under fluorescent light. High contrast, plain
-     type, nothing decorative. */
-  @apply bg-slate-50 text-slate-900 antialiased;
-}
-
+/* Dark is SELECTED, not flipped: its own steps, validated against its own
+   surface (#10150f). Declared under both scopes so an explicit choice wins
+   either way. */
 @media (prefers-color-scheme: dark) {
-  body {
-    @apply bg-slate-950 text-slate-100;
+  :root:where(:not([data-theme='light'])) {
+    color-scheme: dark;
+    --plane: #080b08;
+    --surface: #10150f;
+    --surface-sunken: #161c15;
+    --border: #232b22;
+    --border-strong: #333d32;
+
+    --ink: #f2f5f2;
+    --ink-secondary: #b3bdb5;
+    --ink-muted: #8a938c;
+
+    --brand: #38ad7c;
+    --brand-strong: #6fd3a2;
+    --brand-on: #06251a;
+
+    --money-in: #38ad7c;
+    --money-out: #c9433c;
+
+    --status-good: #38ad7c;
+    --status-warn: #d9a13a;
+    --status-critical: #c9433c;
+    --status-good-bg: #10251c;
+    --status-warn-bg: #241d0d;
+    --status-critical-bg: #2a1414;
+
+    --ramp-1: #0a7247;
+    --ramp-2: #12915c;
+    --ramp-3: #2fb673;
+    --ramp-4: #6fd3a2;
+
+    --grid: #1e251d;
+    --axis: #333d32;
   }
 }
 
-/* Amounts are read in columns and checked by eye against a printed bill, so
-   figures line up rather than reflowing with the text. */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --plane: #080b08;
+  --surface: #10150f;
+  --surface-sunken: #161c15;
+  --border: #232b22;
+  --border-strong: #333d32;
+
+  --ink: #f2f5f2;
+  --ink-secondary: #b3bdb5;
+  --ink-muted: #8a938c;
+
+  --brand: #38ad7c;
+  --brand-strong: #6fd3a2;
+  --brand-on: #06251a;
+
+  --money-in: #38ad7c;
+  --money-out: #c9433c;
+
+  --status-good: #38ad7c;
+  --status-warn: #d9a13a;
+  --status-critical: #c9433c;
+  --status-good-bg: #10251c;
+  --status-warn-bg: #241d0d;
+  --status-critical-bg: #2a1414;
+
+  --ramp-1: #0a7247;
+  --ramp-2: #12915c;
+  --ramp-3: #2fb673;
+  --ramp-4: #6fd3a2;
+
+  --grid: #1e251d;
+  --axis: #333d32;
+}
+
+body {
+  background: var(--plane);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ------------------------------------------------------------
+   Figures
+   ------------------------------------------------------------
+   TABULAR ONLY IN COLUMNS. tabular-nums gives every digit the width of a zero,
+   which is what lets a column of amounts be scanned down — and what makes a
+   large standalone number look loose. So the hero figure and tile values use
+   the font's proportional figures, and only table cells go tabular.
+   ------------------------------------------------------------ */
 .figure {
   font-variant-numeric: tabular-nums;
-  @apply font-mono;
+  font-feature-settings: 'tnum';
+}
+
+.hero-figure {
+  font-variant-numeric: proportional-nums;
+  letter-spacing: -0.02em;
+}
+
+/* A card, as a bank statement panel: a real border, almost no shadow. */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+}
+
+/* Data-ends rounded 4px and anchored to the baseline, per the mark spec. */
+.bar-fill {
+  border-radius: 0 4px 4px 0;
+  transition: width 420ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+/* A 2px surface gap between adjacent fills, so segments read as separate marks
+   rather than one blended block. */
+.segmented > * + * {
+  margin-left: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar-fill,
+  * {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
 }

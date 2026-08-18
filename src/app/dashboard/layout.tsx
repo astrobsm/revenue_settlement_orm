@@ -1,14 +1,19 @@
 // ============================================================
-// The signed-in shell
+// The signed-in shell — a bank layout
 // ------------------------------------------------------------
-// Guards the whole dashboard, and hides navigation the user's roles cannot use.
+// A persistent left rail rather than a top tab bar, because a cashier works one
+// screen all day and a rail keeps the whole system one click away without
+// reflowing when the window narrows. Below 1024px it becomes a horizontal strip:
+// a rail that collapses to a hamburger hides the only navigation a standing
+// clerk has.
 //
-// THE HIDING IS A COURTESY, NOT A CONTROL. Every route behind these links checks
-// permissions again server-side, and that check is the security boundary. A menu
-// item that is merely absent from the page is one URL away from being visited.
+// The green header band is the brand, and it is also doing a job — it marks the
+// authenticated area, so nobody mistakes the public readiness page for the
+// system itself.
 //
-// It also carries the MFA warning, because an administrator who has not enrolled
-// will otherwise meet a 403 on a screen the menu told them they could use.
+// NAVIGATION HIDING IS A COURTESY, NOT A CONTROL. Every route behind these links
+// checks permissions again server-side, and that check is the boundary. A menu
+// item merely absent from the page is one typed URL away from being visited.
 // ============================================================
 
 import Link from 'next/link';
@@ -18,6 +23,7 @@ import { authOptions } from '@/lib/auth';
 import prisma from '@/lib/prisma';
 import { can, Permission, RevenueRole } from '@/lib/rbac';
 import { mfaRequiredFor } from '@/lib/mfa';
+import { StatusPill } from '@/components/Delta';
 
 export const dynamic = 'force-dynamic';
 
@@ -38,60 +44,124 @@ export default async function DashboardLayout({ children }: { children: React.Re
   const roles = user.roles.map((r) => r.role) as RevenueRole[];
   const mfaOutstanding = mfaRequiredFor(roles) && !user.mfaEnabled;
 
-  // Only screens that exist. Invoices, reconciliation and settings are reachable
-  // over the API but have no page yet, and a menu item leading to a 404 is worse
-  // than an absent one.
+  // Only screens that exist. A menu item leading to a 404 is worse than an
+  // absent one.
   const links = [
-    { href: '/dashboard', label: 'Overview', show: true },
+    { href: '/dashboard', label: 'Overview', glyph: '▦', show: true },
     {
       href: '/dashboard/desk',
       label: 'Revenue desk',
+      glyph: '₦',
       show: can(roles, Permission.PAYMENT_CONFIRM) || can(roles, Permission.PAYMENT_VIEW),
     },
-    { href: '/dashboard/security', label: 'Security', show: true },
+    { href: '/dashboard/security', label: 'Security', glyph: '⛨', show: true },
   ].filter((l) => l.show);
 
+  const initials = user.fullName
+    .split(' ')
+    .map((p) => p[0])
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
+
   return (
-    <div className="min-h-screen">
-      <header className="border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
-        <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3 px-6 py-3">
-          <div>
-            <p className="text-xs uppercase tracking-widest text-slate-500">UNTH Ituku Ozalla</p>
-            <p className="text-sm font-semibold">Central Theatre Revenue</p>
-          </div>
-          <div className="text-right text-xs text-slate-600 dark:text-slate-400">
-            <p className="font-medium text-slate-900 dark:text-slate-100">{user.fullName}</p>
-            <p>{roles.join(' · ').toLowerCase().replace(/_/g, ' ')}</p>
-          </div>
+    <div className="min-h-screen lg:flex">
+      {/* --- The rail ---------------------------------------------------- */}
+      <aside
+        className="shrink-0 lg:min-h-screen lg:w-60"
+        style={{ background: 'var(--brand-strong)', color: 'var(--brand-on)' }}
+      >
+        <div className="px-5 py-5">
+          <p className="text-[10px] uppercase tracking-[0.18em] opacity-70">UNTH Ituku Ozalla</p>
+          <p className="mt-0.5 text-base font-semibold leading-tight">
+            Central Theatre
+            <br />
+            Revenue
+          </p>
         </div>
 
-        <nav className="mx-auto max-w-5xl px-6">
-          <ul className="flex flex-wrap gap-4 pb-2 text-sm">
+        <nav aria-label="Main">
+          <ul className="flex gap-1 overflow-x-auto px-3 pb-3 lg:flex-col lg:overflow-visible">
             {links.map((link) => (
-              <li key={link.href}>
-                <Link href={link.href} className="text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100">
+              <li key={link.href} className="shrink-0">
+                <Link
+                  href={link.href}
+                  className="flex items-center gap-2.5 whitespace-nowrap rounded px-3 py-2 text-sm transition-colors hover:bg-white/10"
+                >
+                  <span aria-hidden className="w-4 text-center opacity-80">
+                    {link.glyph}
+                  </span>
                   {link.label}
                 </Link>
               </li>
             ))}
           </ul>
         </nav>
-      </header>
 
-      {mfaOutstanding && (
-        <div className="border-b border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950">
-          <div className="mx-auto max-w-5xl px-6 py-3 text-sm text-amber-900 dark:text-amber-200">
-            <strong>Your role requires a second factor.</strong> Until you enrol, configuration is closed to you —
-            accounts, allocation rules, beneficiaries and prices will all refuse you.{' '}
+        <div className="mt-auto hidden px-5 py-4 text-[11px] leading-relaxed opacity-60 lg:block">
+          Every figure in this system is traceable from the charge that produced it to the account it was settled to.
+        </div>
+      </aside>
+
+      {/* --- The working area -------------------------------------------- */}
+      <div className="min-w-0 flex-1">
+        <header
+          className="flex flex-wrap items-center justify-between gap-3 border-b px-6 py-3"
+          style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}
+        >
+          <div className="flex items-center gap-3">
+            <span
+              aria-hidden
+              className="grid h-9 w-9 place-items-center rounded-full text-xs font-semibold"
+              style={{ background: 'var(--brand)', color: 'var(--brand-on)' }}
+            >
+              {initials}
+            </span>
+            <div>
+              <p className="text-sm font-medium leading-tight">{user.fullName}</p>
+              <p className="text-xs leading-tight" style={{ color: 'var(--ink-muted)' }}>
+                {roles.join(' · ').toLowerCase().replace(/_/g, ' ')}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            {user.mfaEnabled ? (
+              <StatusPill tone="good">Second factor on</StatusPill>
+            ) : mfaOutstanding ? (
+              <StatusPill tone="critical">Second factor required</StatusPill>
+            ) : (
+              <StatusPill tone="neutral">No second factor</StatusPill>
+            )}
+            <Link
+              href="/api/auth/signout"
+              className="rounded border px-3 py-1.5 text-xs"
+              style={{ borderColor: 'var(--border-strong)', color: 'var(--ink-secondary)' }}
+            >
+              Sign out
+            </Link>
+          </div>
+        </header>
+
+        {mfaOutstanding && (
+          <div
+            className="border-b px-6 py-3 text-sm"
+            style={{ background: 'var(--status-critical-bg)', borderColor: 'var(--border)', color: 'var(--status-critical)' }}
+          >
+            <span aria-hidden className="mr-1.5 font-mono">
+              ✕
+            </span>
+            <strong>Configuration is closed to you.</strong> Your role requires a second factor — accounts, allocation
+            rules, beneficiaries and prices will all refuse you until you enrol.{' '}
             <Link href="/dashboard/security" className="underline">
               Enrol now
             </Link>
             .
           </div>
-        </div>
-      )}
+        )}
 
-      <main className="mx-auto max-w-5xl px-6 py-8">{children}</main>
+        <main className="px-6 py-7">{children}</main>
+      </div>
     </div>
   );
 }
