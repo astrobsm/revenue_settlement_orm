@@ -648,8 +648,13 @@ model Payment {
 model PaymentTransaction {
   id String @id @default(uuid())
 
-  paymentId String
-  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  /// OPTIONAL, and this matters. A webhook arrives BEFORE any payment row
+  /// exists — that is the normal order of events, not an edge case — and a
+  /// rejected-signature attempt may never correspond to a payment at all. A
+  /// required link here would mean either discarding those records or inventing
+  /// a payment to hang them on, and both are worse than a nullable column.
+  paymentId String?
+  payment   Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
 
   providerId String?
   provider   PaymentProvider? @relation(fields: [providerId], references: [id], onDelete: SetNull)

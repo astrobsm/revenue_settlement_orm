@@ -21,7 +21,7 @@ SERVICE → PRICE → INVOICE → PAYMENT → VERIFICATION → ALLOCATION
 written.** See [Build state](#build-state) for exactly what exists.
 
 ```
-207 passed, 0 failed        npm test
+243 passed, 0 failed        npm test
 schema valid                npx prisma validate
 strict typecheck clean      npx tsc --noEmit
 ```
@@ -141,6 +141,8 @@ fails the build rather than quietly opening a door:
 | Pro-rata part payments | `proRataLines()` in allocation.ts | in the 53 |
 | Vendor supply agreements: levy, signatures, consent | [src/lib/agreements.ts](src/lib/agreements.ts) | 29 |
 | Bank-detail encryption and masking | [src/lib/crypto.ts](src/lib/crypto.ts) | — |
+| Webhook signature verification and event handling | [src/lib/payments/webhooks.ts](src/lib/payments/webhooks.ts) | 36 |
+| Provider adapters — Paystack, Flutterwave | [src/lib/payments/providers.ts](src/lib/payments/providers.ts) | — |
 | Full database schema (36 models) | [prisma/schema.prisma](prisma/schema.prisma) | validates |
 | Migrations, incl. database-level append-only triggers | [prisma/migrations/](prisma/migrations/) | — |
 | Seed: catalogue, accounts, rules, providers, policy | [prisma/seed.ts](prisma/seed.ts) | — |
@@ -148,6 +150,7 @@ fails the build rather than quietly opening a door:
 | Auth, route guard, audit trail, idempotency, numbering | [src/lib/](src/lib/) | — |
 | `POST /api/invoices`, `POST /api/payments` | [src/app/api/](src/app/api/) | — |
 | Settings: revenue-account bank details, vendor agreements | [src/app/api/settings/](src/app/api/settings/) | — |
+| `POST /api/payments/initiate`, `POST /api/webhooks/[provider]` | [src/app/api/](src/app/api/) | — |
 
 The append-only rule is enforced by **database triggers**, not only in
 TypeScript: an application rule is bypassed by `psql`, by a migration script, and
@@ -156,8 +159,7 @@ exchanges and issued receipts reject `UPDATE` and `DELETE` outright.
 
 ### Not yet built
 
-Payment-provider adapters (Paystack, Flutterwave) · webhook verification
-endpoint · reconciliation runner · refunds and deposit draw-down routes · receipt
+Reconciliation runner · refunds and deposit draw-down routes · receipt
 and QR generation · dashboards · patient portal · UI.
 
 [ARCHITECTURE.md](ARCHITECTURE.md) records the design decisions and the order the
