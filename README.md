@@ -21,7 +21,7 @@ SERVICE → PRICE → INVOICE → PAYMENT → VERIFICATION → ALLOCATION
 written.** See [Build state](#build-state) for exactly what exists.
 
 ```
-272 passed, 0 failed        npm test
+328 passed, 0 failed        npm test
 schema valid                npx prisma validate
 strict typecheck clean      npx tsc --noEmit
 ```
@@ -144,6 +144,8 @@ fails the build rather than quietly opening a door:
 | Webhook signature verification and event handling | [src/lib/payments/webhooks.ts](src/lib/payments/webhooks.ts) | 36 |
 | Provider adapters — Paystack, Flutterwave | [src/lib/payments/providers.ts](src/lib/payments/providers.ts) | — |
 | Reconciliation: twelve exception types across five records | [src/lib/reconciliation.ts](src/lib/reconciliation.ts) | 29 |
+| Refunds: lifecycle, and unwinding settled allocations | [src/lib/refunds.ts](src/lib/refunds.ts) | 31 |
+| Deposits: liability, draw-down, discharge | [src/lib/deposits.ts](src/lib/deposits.ts) | 25 |
 | Full database schema (36 models) | [prisma/schema.prisma](prisma/schema.prisma) | validates |
 | Migrations, incl. database-level append-only triggers | [prisma/migrations/](prisma/migrations/) | — |
 | Seed: catalogue, accounts, rules, providers, policy | [prisma/seed.ts](prisma/seed.ts) | — |
@@ -153,6 +155,7 @@ fails the build rather than quietly opening a door:
 | Settings: revenue-account bank details, vendor agreements | [src/app/api/settings/](src/app/api/settings/) | — |
 | `POST /api/payments/initiate`, `POST /api/webhooks/[provider]` | [src/app/api/](src/app/api/) | — |
 | `POST /api/reconciliation` — daily run and exception resolution | [src/app/api/reconciliation/](src/app/api/reconciliation/) | — |
+| `/api/refunds`, `/api/deposits` | [src/app/api/](src/app/api/) | — |
 
 The append-only rule is enforced by **database triggers**, not only in
 TypeScript: an application rule is bypassed by `psql`, by a migration script, and
@@ -161,8 +164,7 @@ exchanges and issued receipts reject `UPDATE` and `DELETE` outright.
 
 ### Not yet built
 
-Refunds and deposit draw-down routes · receipt
-and QR generation · dashboards · patient portal · UI.
+Receipt and QR generation · dashboards · patient portal · UI.
 
 [ARCHITECTURE.md](ARCHITECTURE.md) records the design decisions and the order the
 remaining phases should be built in.
