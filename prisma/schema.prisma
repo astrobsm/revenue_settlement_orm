@@ -39,7 +39,21 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+
+  /// Runtime connection. On Supabase this is the POOLED connection (port 6543,
+  /// pgbouncer), because a serverless or multi-instance deployment opens far
+  /// more connections than Postgres will tolerate directly.
+  url = env("DATABASE_URL")
+
+  /// Migrations and introspection. On Supabase this MUST be the DIRECT
+  /// connection (port 5432): pgbouncer runs in transaction mode and cannot
+  /// carry the session-level statements a migration issues — CREATE TRIGGER,
+  /// advisory locks, the migration lock itself. Pointing this at the pooler
+  /// produces migrations that appear to hang and then fail halfway.
+  ///
+  /// Falls back to DATABASE_URL when unset, so a plain local Postgres needs
+  /// only the one variable.
+  directUrl = env("DIRECT_URL")
 }
 
 // ============================================================================

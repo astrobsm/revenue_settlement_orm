@@ -242,6 +242,44 @@ moves money out.
 
 ---
 
+## Deploying on Supabase
+
+Supabase is ordinary PostgreSQL: the schema and all three migrations apply
+unchanged. Three things differ, and one of them is a security cliff.
+
+**Two connection strings.** `DATABASE_URL` is the pooled connection (port 6543,
+`?pgbouncer=true`) used at runtime; `DIRECT_URL` is the direct connection (port
+5432) used for migrations. pgbouncer runs in transaction mode and cannot carry
+the session-level statements a migration issues — `CREATE TRIGGER`, advisory
+locks, the migration lock itself. Point `DIRECT_URL` at the pooler and migrations
+appear to hang, then fail halfway.
+
+**Supabase publishes every table in `public` through PostgREST**, reachable with
+the `anon` key — which is not a secret, and is designed to be embedded in browser
+JavaScript. Prisma does not create tables with row level security enabled, so
+without intervention, moving this database to Supabase would expose every patient
+name, charge description, invoice and payment to anyone who asked, and allow
+writes as well.
+
+The `lock_down_postgrest` migration closes that door: RLS enabled on every table
+with **no policies at all**, and `anon` / `authenticated` revoked every privilege
+— including *default* privileges, so tables added by future migrations are
+covered too. It then refuses to complete if any table was missed, because a
+security migration that half-applies is worse than one that fails.
+
+Enabling RLS with no policies is the right posture here rather than writing
+permissive ones, because this application never uses the Supabase SDK or its
+auto-generated API. It reaches the database only through Prisma, server-side, as
+the schema owner. Every access decision lives in `apiGuard.ts` — permissions,
+MFA, separation of duties — and none of it is expressible as a row predicate.
+*"May this person confirm this payment, given what they did to the invoice
+earlier?"* is not a question RLS can answer.
+
+**The `service_role` key bypasses RLS entirely** and is equivalent to the
+database password. This application needs neither Supabase key.
+
+---
+
 ## Relationship to ORM
 
 Separate application, separate database. Central Theatre Revenue reads patient,
